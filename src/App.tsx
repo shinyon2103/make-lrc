@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { MouseEvent as ReactMouseEvent } from "react";
 
 const STORAGE_KEY = "makelrc.autosave.v3";
 const RETAKE_MARGIN_SECONDS = 2.5;
@@ -145,6 +146,10 @@ export function App() {
     if (activeElement instanceof HTMLButtonElement) {
       activeElement.blur();
     }
+  }, []);
+
+  const preventButtonMouseFocus = useCallback((event: ReactMouseEvent<HTMLButtonElement>) => {
+    event.preventDefault();
   }, []);
 
   const syncCurrentTime = useCallback((force = false) => {
@@ -374,12 +379,14 @@ export function App() {
 
       if (event.code === "Space" && event.shiftKey) {
         event.preventDefault();
+        event.stopPropagation();
         togglePlayback();
         return;
       }
 
       if (event.code === "Space") {
         event.preventDefault();
+        event.stopPropagation();
         stampCurrentLine();
         return;
       }
@@ -426,8 +433,21 @@ export function App() {
       }
     };
 
+    const onKeyUp = (event: KeyboardEvent) => {
+      if (isEditableTarget(event.target)) return;
+
+      if (event.code === "Space") {
+        event.preventDefault();
+        event.stopPropagation();
+      }
+    };
+
     document.addEventListener("keydown", onKeyDown, { capture: true });
-    return () => document.removeEventListener("keydown", onKeyDown, { capture: true });
+    document.addEventListener("keyup", onKeyUp, { capture: true });
+    return () => {
+      document.removeEventListener("keydown", onKeyDown, { capture: true });
+      document.removeEventListener("keyup", onKeyUp, { capture: true });
+    };
   }, [moveActive, redo, retakeCurrentLine, seekBy, stampCurrentLine, togglePlayback, undo]);
 
   useEffect(() => {
@@ -457,11 +477,11 @@ export function App() {
             <p>{saveStatus}</p>
           </div>
           <div className="topbar-actions">
-            <button type="button" aria-expanded={helpOpen} onClick={() => setHelpOpen((open) => !open)}>
+            <button type="button" aria-expanded={helpOpen} onMouseDown={preventButtonMouseFocus} onClick={() => setHelpOpen((open) => !open)}>
               ヘルプ
             </button>
-            <button type="button" onClick={copyOutput}>コピー</button>
-            <button type="button" onClick={downloadOutput}>保存</button>
+            <button type="button" onMouseDown={preventButtonMouseFocus} onClick={copyOutput}>コピー</button>
+            <button type="button" onMouseDown={preventButtonMouseFocus} onClick={downloadOutput}>保存</button>
           </div>
         </header>
 
@@ -512,7 +532,7 @@ export function App() {
           <section className="lyrics-panel" aria-label="歌詞入力">
             <div className="panel-heading">
               <h2>歌詞</h2>
-              <button type="button" onClick={pasteLyrics}>貼り付け</button>
+              <button type="button" onMouseDown={preventButtonMouseFocus} onClick={pasteLyrics}>貼り付け</button>
             </div>
             <textarea
               value={lyrics}
@@ -527,18 +547,18 @@ export function App() {
               <span id="currentTime">{formatLrcTime(currentTime)}</span>
               <strong id="activeLine">{activeLine}</strong>
             </div>
-            <button className="tap-zone" type="button" onClick={stampCurrentLine}>
+            <button className="tap-zone" type="button" onMouseDown={preventButtonMouseFocus} onClick={stampCurrentLine}>
               <span>タップで打刻</span>
             </button>
             <div className="control-grid">
-              <button type="button" onClick={togglePlayback}>再生/停止</button>
-              <button type="button" onClick={retakeCurrentLine}>打ち直し</button>
-              <button type="button" onClick={() => moveActive(-1)}>前へ</button>
-              <button type="button" onClick={() => moveActive(1)}>次へ</button>
-              <button type="button" onClick={() => seekBy(-SEEK_STEP_SECONDS)}>-3秒</button>
-              <button type="button" onClick={() => seekBy(SEEK_STEP_SECONDS)}>+3秒</button>
-              <button type="button" disabled={!undoStack.length} onClick={undo}>取消</button>
-              <button type="button" disabled={!redoStack.length} onClick={redo}>やり直し</button>
+              <button type="button" onMouseDown={preventButtonMouseFocus} onClick={togglePlayback}>再生/停止</button>
+              <button type="button" onMouseDown={preventButtonMouseFocus} onClick={retakeCurrentLine}>打ち直し</button>
+              <button type="button" onMouseDown={preventButtonMouseFocus} onClick={() => moveActive(-1)}>前へ</button>
+              <button type="button" onMouseDown={preventButtonMouseFocus} onClick={() => moveActive(1)}>次へ</button>
+              <button type="button" onMouseDown={preventButtonMouseFocus} onClick={() => seekBy(-SEEK_STEP_SECONDS)}>-3秒</button>
+              <button type="button" onMouseDown={preventButtonMouseFocus} onClick={() => seekBy(SEEK_STEP_SECONDS)}>+3秒</button>
+              <button type="button" disabled={!undoStack.length} onMouseDown={preventButtonMouseFocus} onClick={undo}>取消</button>
+              <button type="button" disabled={!redoStack.length} onMouseDown={preventButtonMouseFocus} onClick={redo}>やり直し</button>
             </div>
             <div className="options-row">
               <label>
@@ -550,7 +570,7 @@ export function App() {
                   <option value="srt">SRT</option>
                 </select>
               </label>
-              <button type="button" onClick={clearTimings}>時刻クリア</button>
+              <button type="button" onMouseDown={preventButtonMouseFocus} onClick={clearTimings}>時刻クリア</button>
             </div>
           </section>
         </section>
