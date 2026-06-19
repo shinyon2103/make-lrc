@@ -13,58 +13,76 @@
   </head>
   <body>
     <main class="app-shell">
-      <section class="workspace" aria-label="同期歌詞エディタ">
+      <section class="workspace" aria-label="MakeLRC editor">
         <header class="topbar">
           <div>
             <h1>MakeLRC</h1>
-            <p id="saveStatus">未保存</p>
+            <p id="saveStatus">Not saved</p>
           </div>
           <div class="topbar-actions">
-            <button id="copyOutputButton" type="button">コピー</button>
-            <button id="downloadButton" type="button">LRC保存</button>
+            <button id="helpButton" type="button" aria-expanded="false">Help</button>
+            <button id="copyOutputButton" type="button">Copy</button>
+            <button id="downloadButton" type="button">Save LRC</button>
           </div>
         </header>
 
-        <section class="audio-panel" aria-label="音源">
+        <section id="helpPanel" class="help-panel" hidden>
+          <h2>Keyboard shortcuts</h2>
+          <div class="shortcut-grid">
+            <span><kbd>Space</kbd></span><span>Stamp current line</span>
+            <span><kbd>Shift</kbd> + <kbd>Space</kbd></span><span>Play / pause</span>
+            <span><kbd>R</kbd></span><span>Retake current line from a little before its timestamp</span>
+            <span><kbd>ArrowUp</kbd> / <kbd>ArrowDown</kbd></span><span>Previous / next line</span>
+            <span><kbd>J</kbd> / <kbd>K</kbd></span><span>Back / forward 3 seconds</span>
+            <span><kbd>Ctrl</kbd>/<kbd>Cmd</kbd> + <kbd>Z</kbd></span><span>Undo</span>
+            <span><kbd>Ctrl</kbd>/<kbd>Cmd</kbd> + <kbd>Y</kbd></span><span>Redo</span>
+            <span><kbd>?</kbd></span><span>Show / hide this help</span>
+          </div>
+        </section>
+
+        <section class="audio-panel" aria-label="Audio">
           <label class="file-picker">
-            <span>音源を選択</span>
+            <span>Choose audio</span>
             <input id="audioFileInput" type="file" accept="audio/*" />
           </label>
           <audio id="audioPlayer" controls playsinline preload="metadata"></audio>
         </section>
 
         <section class="editor-grid">
-          <section class="lyrics-panel" aria-label="歌詞入力">
+          <section class="lyrics-panel" aria-label="Lyrics input">
             <div class="panel-heading">
-              <h2>歌詞</h2>
-              <button id="pasteButton" type="button">ペースト</button>
+              <h2>Lyrics</h2>
+              <button id="pasteButton" type="button">Paste</button>
             </div>
             <textarea
               id="lyricsInput"
               spellcheck="false"
-              placeholder="ここに歌詞を入力またはペースト"
+              placeholder="Type or paste lyrics here. Blank lines are removed automatically."
             ></textarea>
           </section>
 
-          <section class="timing-panel" aria-label="タイミング作成">
+          <section class="timing-panel" aria-label="Timing controls">
             <div class="timing-display">
               <span id="currentTime">00:00.00</span>
-              <strong id="activeLine">歌詞を入力してください</strong>
+              <strong id="activeLine">Enter lyrics to start</strong>
             </div>
-            <div class="tap-zone" id="tapZone" role="button" tabindex="0" aria-label="現在の行にタイムスタンプ">
-              <span>タップで打刻</span>
+            <div class="tap-zone" id="tapZone" role="button" tabindex="0" aria-label="Stamp current line">
+              <span>Tap to stamp</span>
             </div>
             <div class="control-grid">
-              <button id="playPauseButton" type="button">再生/停止</button>
-              <button id="stampButton" type="button">打刻</button>
-              <button id="previousButton" type="button">戻る</button>
-              <button id="nextButton" type="button">進む</button>
-              <button id="undoButton" type="button">取消</button>
-              <button id="redoButton" type="button">やり直し</button>
+              <button id="playPauseButton" type="button">Play / Pause</button>
+              <button id="stampButton" type="button">Stamp</button>
+              <button id="retakeButton" type="button">Retake</button>
+              <button id="previousButton" type="button">Previous</button>
+              <button id="nextButton" type="button">Next</button>
+              <button id="backButton" type="button">-3s</button>
+              <button id="forwardButton" type="button">+3s</button>
+              <button id="undoButton" type="button">Undo</button>
+              <button id="redoButton" type="button">Redo</button>
             </div>
             <div class="options-row">
               <label>
-                出力
+                Format
                 <select id="formatSelect">
                   <option value="lrc">LRC</option>
                   <option value="enhanced-lrc">Enhanced LRC</option>
@@ -72,17 +90,17 @@
                   <option value="srt">SRT</option>
                 </select>
               </label>
-              <button id="clearTimingsButton" type="button">時刻クリア</button>
+              <button id="clearTimingsButton" type="button">Clear timings</button>
             </div>
           </section>
         </section>
 
-        <section class="preview-panel" aria-label="出力プレビュー">
+        <section class="preview-panel" aria-label="Output preview">
           <div class="panel-heading">
-            <h2>出力</h2>
-            <span id="lineCount">0行</span>
+            <h2>Output</h2>
+            <span id="lineCount">0 lines</span>
           </div>
-          <textarea id="outputPreview" readonly spellcheck="false"></textarea>
+          <div id="outputPreview" class="output-preview" role="textbox" aria-readonly="true" tabindex="0"></div>
         </section>
       </section>
     </main>
