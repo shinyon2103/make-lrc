@@ -257,7 +257,7 @@ audio {
 }
 
 .active-token {
-  display: inline;
+  display: inline-block;
   border-radius: 4px;
 }
 
@@ -271,6 +271,14 @@ audio {
   box-shadow: 0 0 0 2px #d7ece6;
 }
 
+.segment-progress {
+  display: block;
+  margin-bottom: 4px;
+  color: var(--muted);
+  font-size: 0.85rem;
+  font-weight: 700;
+}
+
 .tap-zone {
   display: grid;
   place-items: center;
@@ -282,7 +290,9 @@ audio {
   font-size: 1.25rem;
   font-weight: 800;
   user-select: none;
-  touch-action: manipulation;
+  -webkit-user-select: none;
+  touch-action: none;
+  -webkit-tap-highlight-color: transparent;
 }
 
 .tap-zone:active {

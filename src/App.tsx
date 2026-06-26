@@ -1,5 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { MouseEvent as ReactMouseEvent } from "react";
+import type {
+  MouseEvent as ReactMouseEvent,
+  PointerEvent as ReactPointerEvent,
+  TouchEvent as ReactTouchEvent,
+} from "react";
 
 const STORAGE_KEY = "makelrc.autosave.v3";
 const RETAKE_MARGIN_SECONDS = 2.5;
@@ -127,15 +131,47 @@ function tokenizeEnhancedText(text: string) {
   return Array.from(text);
 }
 
+function containsJapaneseText(text: string) {
+  return /[\u3040-\u30ff\u3400-\u9fff]/.test(text);
+}
+
+function tokenizeCharactersSkippingStandaloneSpaces(text: string) {
+  const tokens: string[] = [];
+  let pendingSpaces = "";
+
+  for (const character of Array.from(text)) {
+    if (/\s/.test(character)) {
+      if (tokens.length) {
+        tokens[tokens.length - 1] += character;
+      } else {
+        pendingSpaces += character;
+      }
+      continue;
+    }
+
+    tokens.push(`${pendingSpaces}${character}`);
+    pendingSpaces = "";
+  }
+
+  if (pendingSpaces && tokens.length) {
+    tokens[tokens.length - 1] += pendingSpaces;
+  }
+
+  return tokens;
+}
+
 function tokenizeForMode(text: string, mode: TimingMode) {
   if (mode === "line") return [text];
+  if (containsJapaneseText(text)) return tokenizeCharactersSkippingStandaloneSpaces(text);
   if (!/\s/.test(text)) return Array.from(text);
   return tokenizeEnhancedText(text);
 }
 
 function getEnhancedTokensForRow(row: OutputRow) {
-  const characterTokens = Array.from(row.text);
+  const characterTokens = tokenizeCharactersSkippingStandaloneSpaces(row.text);
   if (row.segmentTimings.length === characterTokens.length) return characterTokens;
+
+  if (containsJapaneseText(row.text)) return characterTokens;
 
   return tokenizeEnhancedText(row.text);
 }
@@ -161,6 +197,7 @@ function buildOutputPreviewBlocks(
   timings: Array<number | undefined>,
   segmentTimings: Array<Array<number | undefined>>,
   format: OutputFormat,
+  options: { compactEnhanced?: boolean } = {},
 ): OutputPreviewBlock[] {
   const rows = getRowsWithSegments(lines, timings, segmentTimings);
 
@@ -193,7 +230,9 @@ function buildOutputPreviewBlocks(
     return rows.map((row, index) => ({
       key: `enhanced-lrc-${row.index}`,
       sourceIndex: row.index,
-      lines: [buildEnhancedLrcLine(row, rows, index)],
+      lines: options.compactEnhanced
+        ? [`[${formatLrcTime(row.time)}]${row.text}`]
+        : [buildEnhancedLrcLine(row, rows, index)],
     }));
   }
 
@@ -288,20 +327,18 @@ export function App() {
   const displayedCentisecondRef = useRef(-1);
   const activeIndexRef = useRef(initialDraft?.activeIndex ?? 0);
   const activeSegmentIndexRef = useRef(initialDraft?.activeSegmentIndex ?? 0);
+  const lastImmediateStampRef = useRef(0);
 
   const outputPreviewBlocks = useMemo(
-    () => buildOutputPreviewBlocks(lines, timings, segmentTimings, format),
-    [format, lines, segmentTimings, timings],
-  );
-  const output = useMemo(
-    () => buildConvertedOutput(lines, timings, segmentTimings, format),
-    [format, lines, segmentTimings, timings],
+    () => buildOutputPreviewBlocks(lines, timings, [], format, { compactEnhanced: true }),
+    [format, lines, timings],
   );
   const activeLine = lines[activeIndex] ?? "歌詞を入力してください";
   const activeTokens = useMemo(
     () => tokenizeForMode(lines[activeIndex] ?? "", timingMode),
     [activeIndex, lines, timingMode],
   );
+  const activeToken = activeTokens[activeSegmentIndex] ?? "";
 
   useEffect(() => {
     activeIndexRef.current = activeIndex;
@@ -381,16 +418,19 @@ export function App() {
   const stampCurrentLine = useCallback(() => {
     if (!lines.length) return;
     releaseButtonFocus();
-    pushUndo();
     const audio = audioRef.current;
     const stampTime = audio?.currentTime ?? 0;
     const currentLineIndex = clampLineIndex(activeIndexRef.current, lines.length);
     const currentSegmentIndex = activeSegmentIndexRef.current;
 
     if (timingMode !== "line") {
+      if (currentSegmentIndex === 0) {
+        pushUndo();
+      }
+
       const tokens = tokenizeForMode(lines[currentLineIndex] ?? "", timingMode);
       setSegmentTimings((current) => {
-        const next = current.map((items) => [...items]);
+        const next = [...current];
         const lineTimings = [...(next[currentLineIndex] ?? [])];
         lineTimings[currentSegmentIndex] = stampTime;
         lineTimings.length = tokens.length;
@@ -421,6 +461,7 @@ export function App() {
       return;
     }
 
+    pushUndo();
     setTimings((current) => {
       const next = [...current];
       next[currentLineIndex] = stampTime;
@@ -432,6 +473,27 @@ export function App() {
     setActiveIndex(nextLineIndex);
     setActiveSegmentIndex(0);
   }, [lines, pushUndo, releaseButtonFocus, timingMode]);
+
+  const stampFromImmediateInput = useCallback((event: ReactPointerEvent<HTMLButtonElement> | ReactTouchEvent<HTMLButtonElement>) => {
+    event.preventDefault();
+    lastImmediateStampRef.current = performance.now();
+    stampCurrentLine();
+  }, [stampCurrentLine]);
+
+  const handleStampPointerDown = useCallback((event: ReactPointerEvent<HTMLButtonElement>) => {
+    if (event.pointerType === "mouse") return;
+    stampFromImmediateInput(event);
+  }, [stampFromImmediateInput]);
+
+  const handleStampTouchStart = useCallback((event: ReactTouchEvent<HTMLButtonElement>) => {
+    if ("PointerEvent" in window) return;
+    stampFromImmediateInput(event);
+  }, [stampFromImmediateInput]);
+
+  const handleStampClick = useCallback(() => {
+    if (performance.now() - lastImmediateStampRef.current < 700) return;
+    stampCurrentLine();
+  }, [stampCurrentLine]);
 
   const retakeCurrentLine = useCallback(() => {
     if (!lines.length) return;
@@ -528,14 +590,15 @@ export function App() {
 
   const clearTimings = useCallback(() => {
     releaseButtonFocus();
-    pushUndo();
     setTimings([]);
     setSegmentTimings([]);
+    setUndoStack([]);
+    setRedoStack([]);
     activeIndexRef.current = 0;
     activeSegmentIndexRef.current = 0;
     setActiveIndex(0);
     setActiveSegmentIndex(0);
-  }, [pushUndo, releaseButtonFocus]);
+  }, [releaseButtonFocus]);
 
   const insertGapAfterCurrentLine = useCallback(() => {
     releaseButtonFocus();
@@ -579,6 +642,7 @@ export function App() {
   }, [updateLyrics]);
 
   const copyOutput = useCallback(async () => {
+    const output = buildConvertedOutput(lines, timings, segmentTimings, format);
     if (!output) return;
     try {
       await navigator.clipboard.writeText(output);
@@ -593,9 +657,10 @@ export function App() {
       textarea.remove();
       setSaveStatus("コピーしました");
     }
-  }, [output]);
+  }, [format, lines, segmentTimings, timings]);
 
   const downloadOutput = useCallback(() => {
+    const output = buildConvertedOutput(lines, timings, segmentTimings, format);
     if (!output) return;
     const extension = format === "webvtt" ? "vtt" : format === "srt" ? "srt" : "lrc";
     const blob = new Blob([output], { type: "text/plain;charset=utf-8" });
@@ -605,7 +670,7 @@ export function App() {
     anchor.download = `lyrics.${extension}`;
     anchor.click();
     URL.revokeObjectURL(url);
-  }, [format, output]);
+  }, [format, lines, segmentTimings, timings]);
 
   const loadAudioFile = useCallback((file: File) => {
     if (!isLikelyAudioFile(file)) {
@@ -638,8 +703,7 @@ export function App() {
       } catch {
         setSaveStatus("一時保存できません");
       }
-    }, 200);
-    setSaveStatus("保存中...");
+    }, 1500);
     return () => window.clearTimeout(timeout);
   }, [activeIndex, activeSegmentIndex, format, lyrics, segmentTimings, timingMode, timings]);
 
@@ -886,21 +950,22 @@ export function App() {
             <div className="timing-display">
               <span id="currentTime">{formatLrcTime(currentTime)}</span>
               <strong id="activeLine">
-                {timingMode === "line" || !activeTokens.length ? (
-                  activeLine
-                ) : (
-                  activeTokens.map((token, index) => (
-                    <span
-                      key={`${index}-${token}`}
-                      className={`active-token${index === activeSegmentIndex ? " is-current" : ""}${Number.isFinite(segmentTimings[activeIndex]?.[index]) ? " is-stamped" : ""}`}
-                    >
-                      {token}
-                    </span>
-                  ))
+                {timingMode === "line" || !activeTokens.length ? activeLine : (
+                  <>
+                    <span className="segment-progress">{activeSegmentIndex + 1}/{activeTokens.length}</span>
+                    <span className="active-token is-current">{activeToken}</span>
+                  </>
                 )}
               </strong>
             </div>
-            <button className="tap-zone" type="button" onMouseDown={preventButtonMouseFocus} onClick={stampCurrentLine}>
+            <button
+              className="tap-zone"
+              type="button"
+              onMouseDown={preventButtonMouseFocus}
+              onPointerDown={handleStampPointerDown}
+              onTouchStart={handleStampTouchStart}
+              onClick={handleStampClick}
+            >
               <span>タップで打刻</span>
             </button>
             <div className="control-grid">
