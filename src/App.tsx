@@ -9,7 +9,9 @@ const STORAGE_KEY = "makelrc.autosave.v3";
 const RETAKE_MARGIN_SECONDS = 2.5;
 const SEEK_STEP_SECONDS = 3;
 const GAP_LINE_TEXT = "♪ 間奏";
-const SMALL_KANA_PATTERN = /^[ぁぃぅぇぉっゃゅょゎァィゥェォッャュョヮゕゖヶ]$/;
+const ATTACHED_KANA_PATTERN = /^[ぁぃぅぇぉっゃゅょゎァィゥェォッャュョヮゕゖヶー]$/;
+const OPENING_BRACKETS = new Set(Array.from("「『（([［｛{【〈《〔〝“‘"));
+const CLOSING_BRACKETS = new Set(Array.from("」』）)]］｝}】〉》〕〟”’"));
 const AUDIO_FILE_EXTENSIONS = new Set([
   "aac",
   "aif",
@@ -154,7 +156,12 @@ function tokenizeCharactersSkippingStandaloneSpaces(text: string) {
       continue;
     }
 
-    if (SMALL_KANA_PATTERN.test(character) && tokens.length) {
+    if (OPENING_BRACKETS.has(character)) {
+      pendingSpaces += character;
+      continue;
+    }
+
+    if ((ATTACHED_KANA_PATTERN.test(character) || CLOSING_BRACKETS.has(character)) && tokens.length) {
       tokens[tokens.length - 1] += `${pendingSpaces}${character}`;
       pendingSpaces = "";
       continue;
