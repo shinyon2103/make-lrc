@@ -1,9 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { MouseEvent as ReactMouseEvent } from "react";
+import type {
+  MouseEvent as ReactMouseEvent,
+  PointerEvent as ReactPointerEvent,
+  TouchEvent as ReactTouchEvent,
+} from "react";
 
 const STORAGE_KEY = "makelrc.autosave.v3";
 const RETAKE_MARGIN_SECONDS = 2.5;
 const SEEK_STEP_SECONDS = 3;
+const GAP_LINE_TEXT = "♪ 間奏";
 const AUDIO_FILE_EXTENSIONS = new Set([
   "aac",
   "aif",
@@ -22,23 +27,30 @@ const AUDIO_FILE_EXTENSIONS = new Set([
 ]);
 
 type OutputFormat = "lrc" | "enhanced-lrc" | "webvtt" | "srt";
+type TimingMode = "line" | "segment";
 
 type Snapshot = {
   timings: Array<number | undefined>;
+  segmentTimings: Array<Array<number | undefined>>;
   activeIndex: number;
+  activeSegmentIndex: number;
 };
 
 type Draft = {
   lyrics: string;
   timings: Array<number | undefined>;
+  segmentTimings?: Array<Array<number | undefined>>;
   activeIndex: number;
+  activeSegmentIndex?: number;
   format: OutputFormat;
+  timingMode?: TimingMode;
 };
 
 type OutputRow = {
   index: number;
   text: string;
   time: number | undefined;
+  segmentTimings: Array<number | undefined>;
 };
 
 type OutputPreviewBlock = {
@@ -84,7 +96,23 @@ function formatWebVttTime(seconds: number | undefined) {
 }
 
 function getRows(lines: string[], timings: Array<number | undefined>): OutputRow[] {
-  return lines.map((text, index) => ({ index, text, time: timings[index] }));
+  return lines.map((text, index) => ({ index, text, time: timings[index], segmentTimings: [] }));
+}
+
+function getRowsWithSegments(
+  lines: string[],
+  timings: Array<number | undefined>,
+  segmentTimings: Array<Array<number | undefined>>,
+): OutputRow[] {
+  return lines.map((text, index) => {
+    const firstSegmentTime = segmentTimings[index]?.find((time) => Number.isFinite(time));
+    return {
+      index,
+      text,
+      time: Number.isFinite(timings[index]) ? timings[index] : firstSegmentTime,
+      segmentTimings: segmentTimings[index] ?? [],
+    };
+  });
 }
 
 function getCueRange(rows: OutputRow[], index: number) {
@@ -103,13 +131,62 @@ function tokenizeEnhancedText(text: string) {
   return Array.from(text);
 }
 
+function containsJapaneseText(text: string) {
+  return /[\u3040-\u30ff\u3400-\u9fff]/.test(text);
+}
+
+function tokenizeCharactersSkippingStandaloneSpaces(text: string) {
+  const tokens: string[] = [];
+  let pendingSpaces = "";
+
+  for (const character of Array.from(text)) {
+    if (/\s/.test(character)) {
+      if (tokens.length) {
+        tokens[tokens.length - 1] += character;
+      } else {
+        pendingSpaces += character;
+      }
+      continue;
+    }
+
+    tokens.push(`${pendingSpaces}${character}`);
+    pendingSpaces = "";
+  }
+
+  if (pendingSpaces && tokens.length) {
+    tokens[tokens.length - 1] += pendingSpaces;
+  }
+
+  return tokens;
+}
+
+function tokenizeForMode(text: string, mode: TimingMode) {
+  if (mode === "line") return [text];
+  if (containsJapaneseText(text)) return tokenizeCharactersSkippingStandaloneSpaces(text);
+  if (!/\s/.test(text)) return Array.from(text);
+  return tokenizeEnhancedText(text);
+}
+
+function getEnhancedTokensForRow(row: OutputRow) {
+  const characterTokens = tokenizeCharactersSkippingStandaloneSpaces(row.text);
+  if (row.segmentTimings.length === characterTokens.length) return characterTokens;
+
+  if (containsJapaneseText(row.text)) return characterTokens;
+
+  return tokenizeEnhancedText(row.text);
+}
+
 function buildEnhancedLrcLine(row: OutputRow, rows: OutputRow[], index: number) {
   const { start, end } = getCueRange(rows, index);
-  const tokens = tokenizeEnhancedText(row.text);
+  const tokens = getEnhancedTokensForRow(row);
   const duration = Math.max(0.2, end - start);
   const step = tokens.length > 0 ? duration / tokens.length : 0;
   const taggedText = tokens
-    .map((token, tokenIndex) => `<${formatLrcTime(start + step * tokenIndex)}>${token}`)
+    .map((token, tokenIndex) => {
+      const segmentTime = row.segmentTimings[tokenIndex];
+      const time = Number.isFinite(segmentTime) ? segmentTime : start + step * tokenIndex;
+      return `<${formatLrcTime(time)}>${token}`;
+    })
     .join("");
 
   return `[${formatLrcTime(row.time)}]${taggedText}`;
@@ -118,9 +195,11 @@ function buildEnhancedLrcLine(row: OutputRow, rows: OutputRow[], index: number) 
 function buildOutputPreviewBlocks(
   lines: string[],
   timings: Array<number | undefined>,
+  segmentTimings: Array<Array<number | undefined>>,
   format: OutputFormat,
+  options: { compactEnhanced?: boolean } = {},
 ): OutputPreviewBlock[] {
-  const rows = getRows(lines, timings);
+  const rows = getRowsWithSegments(lines, timings, segmentTimings);
 
   if (format === "webvtt") {
     return [
@@ -151,7 +230,9 @@ function buildOutputPreviewBlocks(
     return rows.map((row, index) => ({
       key: `enhanced-lrc-${row.index}`,
       sourceIndex: row.index,
-      lines: [buildEnhancedLrcLine(row, rows, index)],
+      lines: options.compactEnhanced
+        ? [`[${formatLrcTime(row.time)}]${row.text}`]
+        : [buildEnhancedLrcLine(row, rows, index)],
     }));
   }
 
@@ -167,7 +248,18 @@ function clampLineIndex(index: number, lineCount: number) {
 }
 
 function buildOutput(lines: string[], timings: Array<number | undefined>, format: OutputFormat) {
-  const blocks = buildOutputPreviewBlocks(lines, timings, format);
+  const blocks = buildOutputPreviewBlocks(lines, timings, [], format);
+  const separator = format === "srt" || format === "webvtt" ? "\n\n" : "\n";
+  return blocks.map((block) => block.lines.join("\n")).join(separator);
+}
+
+function buildConvertedOutput(
+  lines: string[],
+  timings: Array<number | undefined>,
+  segmentTimings: Array<Array<number | undefined>>,
+  format: OutputFormat,
+) {
+  const blocks = buildOutputPreviewBlocks(lines, timings, segmentTimings, format);
   const separator = format === "srt" || format === "webvtt" ? "\n\n" : "\n";
   return blocks.map((block) => block.lines.join("\n")).join(separator);
 }
@@ -177,11 +269,17 @@ function readDraft(): Draft | null {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return null;
     const draft = JSON.parse(raw) as Partial<Draft>;
+    const savedTimingMode = draft.timingMode as string | undefined;
     return {
       lyrics: normalizeLyrics(draft.lyrics ?? ""),
       timings: Array.isArray(draft.timings) ? draft.timings : [],
+      segmentTimings: Array.isArray(draft.segmentTimings) ? draft.segmentTimings : [],
       activeIndex: Number.isInteger(draft.activeIndex) ? draft.activeIndex ?? 0 : 0,
+      activeSegmentIndex: Number.isInteger(draft.activeSegmentIndex) ? draft.activeSegmentIndex ?? 0 : 0,
       format: draft.format ?? "lrc",
+      timingMode: savedTimingMode === "word" || savedTimingMode === "char"
+        ? "segment"
+        : draft.timingMode ?? "line",
     };
   } catch {
     return null;
@@ -208,10 +306,15 @@ export function App() {
   const [lyrics, setLyrics] = useState(initialDraft?.lyrics ?? "");
   const [lines, setLines] = useState(() => parseLines(initialDraft?.lyrics ?? ""));
   const [timings, setTimings] = useState<Array<number | undefined>>(initialDraft?.timings ?? []);
+  const [segmentTimings, setSegmentTimings] = useState<Array<Array<number | undefined>>>(
+    initialDraft?.segmentTimings ?? [],
+  );
   const [activeIndex, setActiveIndex] = useState(initialDraft?.activeIndex ?? 0);
+  const [activeSegmentIndex, setActiveSegmentIndex] = useState(initialDraft?.activeSegmentIndex ?? 0);
   const [undoStack, setUndoStack] = useState<Snapshot[]>([]);
   const [redoStack, setRedoStack] = useState<Snapshot[]>([]);
   const [format, setFormat] = useState<OutputFormat>(initialDraft?.format ?? "lrc");
+  const [timingMode, setTimingMode] = useState<TimingMode>(initialDraft?.timingMode ?? "line");
   const [saveStatus, setSaveStatus] = useState(initialDraft ? "一時保存を復元" : "未保存");
   const [currentTime, setCurrentTime] = useState(0);
   const [audioUrl, setAudioUrl] = useState("");
@@ -222,21 +325,43 @@ export function App() {
   const activeOutputRef = useRef<HTMLDivElement | null>(null);
   const animationFrameRef = useRef<number | null>(null);
   const displayedCentisecondRef = useRef(-1);
+  const activeIndexRef = useRef(initialDraft?.activeIndex ?? 0);
+  const activeSegmentIndexRef = useRef(initialDraft?.activeSegmentIndex ?? 0);
+  const lastImmediateStampRef = useRef(0);
 
   const outputPreviewBlocks = useMemo(
-    () => buildOutputPreviewBlocks(lines, timings, format),
+    () => buildOutputPreviewBlocks(lines, timings, [], format, { compactEnhanced: true }),
     [format, lines, timings],
   );
-  const output = useMemo(() => buildOutput(lines, timings, format), [format, lines, timings]);
   const activeLine = lines[activeIndex] ?? "歌詞を入力してください";
+  const activeTokens = useMemo(
+    () => tokenizeForMode(lines[activeIndex] ?? "", timingMode),
+    [activeIndex, lines, timingMode],
+  );
+
+  useEffect(() => {
+    activeIndexRef.current = activeIndex;
+  }, [activeIndex]);
+
+  useEffect(() => {
+    activeSegmentIndexRef.current = activeSegmentIndex;
+  }, [activeSegmentIndex]);
 
   const pushUndo = useCallback(() => {
     setUndoStack((stack) => {
-      const next = [...stack, { timings: [...timings], activeIndex }];
+      const next = [
+        ...stack,
+        {
+          timings: [...timings],
+          segmentTimings: segmentTimings.map((items) => [...items]),
+          activeIndex,
+          activeSegmentIndex,
+        },
+      ];
       return next.length > 100 ? next.slice(1) : next;
     });
     setRedoStack([]);
-  }, [activeIndex, timings]);
+  }, [activeIndex, activeSegmentIndex, segmentTimings, timings]);
 
   const releaseButtonFocus = useCallback(() => {
     const activeElement = document.activeElement;
@@ -284,39 +409,124 @@ export function App() {
     setLyrics(normalized);
     setLines(nextLines);
     setTimings((current) => current.slice(0, nextLines.length));
+    setSegmentTimings((current) => current.slice(0, nextLines.length));
     setActiveIndex((index) => clampLineIndex(index, nextLines.length));
+    setActiveSegmentIndex(0);
   }, []);
 
   const stampCurrentLine = useCallback(() => {
     if (!lines.length) return;
     releaseButtonFocus();
-    pushUndo();
     const audio = audioRef.current;
+    const stampTime = audio?.currentTime ?? 0;
+    const currentLineIndex = clampLineIndex(activeIndexRef.current, lines.length);
+    const currentSegmentIndex = activeSegmentIndexRef.current;
+
+    if (timingMode !== "line") {
+      if (currentSegmentIndex === 0) {
+        pushUndo();
+      }
+
+      const tokens = tokenizeForMode(lines[currentLineIndex] ?? "", timingMode);
+      setSegmentTimings((current) => {
+        const next = [...current];
+        const lineTimings = [...(next[currentLineIndex] ?? [])];
+        lineTimings[currentSegmentIndex] = stampTime;
+        lineTimings.length = tokens.length;
+        next[currentLineIndex] = lineTimings;
+        return next;
+      });
+
+      if (currentSegmentIndex === 0) {
+        setTimings((current) => {
+          const next = [...current];
+          next[currentLineIndex] = stampTime;
+          return next;
+        });
+      }
+
+      const tokenCount = tokens.length;
+      if (currentSegmentIndex + 1 < tokenCount) {
+        const nextSegmentIndex = currentSegmentIndex + 1;
+        activeSegmentIndexRef.current = nextSegmentIndex;
+        setActiveSegmentIndex(nextSegmentIndex);
+      } else {
+        const nextLineIndex = clampLineIndex(currentLineIndex + 1, lines.length);
+        activeIndexRef.current = nextLineIndex;
+        activeSegmentIndexRef.current = 0;
+        setActiveIndex(nextLineIndex);
+        setActiveSegmentIndex(0);
+      }
+      return;
+    }
+
+    pushUndo();
     setTimings((current) => {
       const next = [...current];
-      next[activeIndex] = audio?.currentTime ?? 0;
+      next[currentLineIndex] = stampTime;
       return next;
     });
-    setActiveIndex((index) => clampLineIndex(index + 1, lines.length));
-  }, [activeIndex, lines.length, pushUndo, releaseButtonFocus]);
+    const nextLineIndex = clampLineIndex(currentLineIndex + 1, lines.length);
+    activeIndexRef.current = nextLineIndex;
+    activeSegmentIndexRef.current = 0;
+    setActiveIndex(nextLineIndex);
+    setActiveSegmentIndex(0);
+  }, [lines, pushUndo, releaseButtonFocus, timingMode]);
+
+  const stampFromImmediateInput = useCallback((event: ReactPointerEvent<HTMLButtonElement> | ReactTouchEvent<HTMLButtonElement>) => {
+    event.preventDefault();
+    lastImmediateStampRef.current = performance.now();
+    stampCurrentLine();
+  }, [stampCurrentLine]);
+
+  const handleStampPointerDown = useCallback((event: ReactPointerEvent<HTMLButtonElement>) => {
+    if (event.pointerType === "mouse") return;
+    stampFromImmediateInput(event);
+  }, [stampFromImmediateInput]);
+
+  const handleStampTouchStart = useCallback((event: ReactTouchEvent<HTMLButtonElement>) => {
+    if ("PointerEvent" in window) return;
+    stampFromImmediateInput(event);
+  }, [stampFromImmediateInput]);
+
+  const handleStampClick = useCallback(() => {
+    if (performance.now() - lastImmediateStampRef.current < 700) return;
+    stampCurrentLine();
+  }, [stampCurrentLine]);
 
   const retakeCurrentLine = useCallback(() => {
     if (!lines.length) return;
     releaseButtonFocus();
     const audio = audioRef.current;
     if (!audio) return;
-    const currentStamp = timings[activeIndex];
+    const currentStamp = timingMode === "line"
+      ? timings[activeIndex]
+      : segmentTimings[activeIndex]?.[activeSegmentIndex] ?? timings[activeIndex];
     audio.currentTime = Number.isFinite(currentStamp)
       ? Math.max(0, (currentStamp ?? 0) - RETAKE_MARGIN_SECONDS)
       : Math.max(0, audio.currentTime - RETAKE_MARGIN_SECONDS);
     setSaveStatus("打ち直し準備");
     syncCurrentTime(true);
     void audio.play().then(startTimeLoop).catch(() => undefined);
-  }, [activeIndex, lines.length, releaseButtonFocus, startTimeLoop, syncCurrentTime, timings]);
+  }, [
+    activeIndex,
+    activeSegmentIndex,
+    lines.length,
+    releaseButtonFocus,
+    segmentTimings,
+    startTimeLoop,
+    syncCurrentTime,
+    timingMode,
+    timings,
+  ]);
 
   const moveActive = useCallback((delta: number) => {
     releaseButtonFocus();
-    setActiveIndex((index) => clampLineIndex(index + delta, lines.length));
+    const nextLineIndex = clampLineIndex(activeIndexRef.current + delta, lines.length);
+    activeIndexRef.current = nextLineIndex;
+    activeSegmentIndexRef.current = 0;
+    setActiveIndex(nextLineIndex);
+    setActiveSegmentIndex(0);
   }, [lines.length, releaseButtonFocus]);
 
   const seekBy = useCallback((delta: number) => {
@@ -332,31 +542,85 @@ export function App() {
     setUndoStack((stack) => {
       const snapshot = stack.at(-1);
       if (!snapshot) return stack;
-      setRedoStack((redo) => [...redo, { timings: [...timings], activeIndex }]);
+      setRedoStack((redo) => [
+        ...redo,
+        {
+          timings: [...timings],
+          segmentTimings: segmentTimings.map((items) => [...items]),
+          activeIndex,
+          activeSegmentIndex,
+        },
+      ]);
       setTimings([...snapshot.timings]);
-      setActiveIndex(clampLineIndex(snapshot.activeIndex, lines.length));
+      setSegmentTimings(snapshot.segmentTimings.map((items) => [...items]));
+      const nextLineIndex = clampLineIndex(snapshot.activeIndex, lines.length);
+      activeIndexRef.current = nextLineIndex;
+      activeSegmentIndexRef.current = snapshot.activeSegmentIndex;
+      setActiveIndex(nextLineIndex);
+      setActiveSegmentIndex(snapshot.activeSegmentIndex);
       return stack.slice(0, -1);
     });
-  }, [activeIndex, lines.length, releaseButtonFocus, timings]);
+  }, [activeIndex, activeSegmentIndex, lines.length, releaseButtonFocus, segmentTimings, timings]);
 
   const redo = useCallback(() => {
     releaseButtonFocus();
     setRedoStack((stack) => {
       const snapshot = stack.at(-1);
       if (!snapshot) return stack;
-      setUndoStack((undoItems) => [...undoItems, { timings: [...timings], activeIndex }]);
+      setUndoStack((undoItems) => [
+        ...undoItems,
+        {
+          timings: [...timings],
+          segmentTimings: segmentTimings.map((items) => [...items]),
+          activeIndex,
+          activeSegmentIndex,
+        },
+      ]);
       setTimings([...snapshot.timings]);
-      setActiveIndex(clampLineIndex(snapshot.activeIndex, lines.length));
+      setSegmentTimings(snapshot.segmentTimings.map((items) => [...items]));
+      const nextLineIndex = clampLineIndex(snapshot.activeIndex, lines.length);
+      activeIndexRef.current = nextLineIndex;
+      activeSegmentIndexRef.current = snapshot.activeSegmentIndex;
+      setActiveIndex(nextLineIndex);
+      setActiveSegmentIndex(snapshot.activeSegmentIndex);
       return stack.slice(0, -1);
     });
-  }, [activeIndex, lines.length, releaseButtonFocus, timings]);
+  }, [activeIndex, activeSegmentIndex, lines.length, releaseButtonFocus, segmentTimings, timings]);
 
   const clearTimings = useCallback(() => {
     releaseButtonFocus();
-    pushUndo();
     setTimings([]);
+    setSegmentTimings([]);
+    setUndoStack([]);
+    setRedoStack([]);
+    activeIndexRef.current = 0;
+    activeSegmentIndexRef.current = 0;
     setActiveIndex(0);
-  }, [pushUndo, releaseButtonFocus]);
+    setActiveSegmentIndex(0);
+  }, [releaseButtonFocus]);
+
+  const insertGapAfterCurrentLine = useCallback(() => {
+    releaseButtonFocus();
+    pushUndo();
+    const insertAt = lines.length ? activeIndex + 1 : 0;
+    const nextLines = [...lines.slice(0, insertAt), GAP_LINE_TEXT, ...lines.slice(insertAt)];
+    setLines(nextLines);
+    setLyrics(nextLines.join("\n"));
+    setTimings((current) => [
+      ...current.slice(0, insertAt),
+      undefined,
+      ...current.slice(insertAt),
+    ]);
+    setSegmentTimings((current) => [
+      ...current.slice(0, insertAt),
+      [],
+      ...current.slice(insertAt),
+    ]);
+    activeIndexRef.current = insertAt;
+    activeSegmentIndexRef.current = 0;
+    setActiveIndex(insertAt);
+    setActiveSegmentIndex(0);
+  }, [activeIndex, lines, pushUndo, releaseButtonFocus]);
 
   const togglePlayback = useCallback(() => {
     const audio = audioRef.current;
@@ -377,6 +641,7 @@ export function App() {
   }, [updateLyrics]);
 
   const copyOutput = useCallback(async () => {
+    const output = buildConvertedOutput(lines, timings, segmentTimings, format);
     if (!output) return;
     try {
       await navigator.clipboard.writeText(output);
@@ -391,9 +656,10 @@ export function App() {
       textarea.remove();
       setSaveStatus("コピーしました");
     }
-  }, [output]);
+  }, [format, lines, segmentTimings, timings]);
 
   const downloadOutput = useCallback(() => {
+    const output = buildConvertedOutput(lines, timings, segmentTimings, format);
     if (!output) return;
     const extension = format === "webvtt" ? "vtt" : format === "srt" ? "srt" : "lrc";
     const blob = new Blob([output], { type: "text/plain;charset=utf-8" });
@@ -403,7 +669,7 @@ export function App() {
     anchor.download = `lyrics.${extension}`;
     anchor.click();
     URL.revokeObjectURL(url);
-  }, [format, output]);
+  }, [format, lines, segmentTimings, timings]);
 
   const loadAudioFile = useCallback((file: File) => {
     if (!isLikelyAudioFile(file)) {
@@ -422,16 +688,23 @@ export function App() {
   useEffect(() => {
     const timeout = window.setTimeout(() => {
       try {
-        const draft: Draft = { lyrics, timings, activeIndex, format };
+        const draft: Draft = {
+          lyrics,
+          timings,
+          segmentTimings,
+          activeIndex,
+          activeSegmentIndex,
+          format,
+          timingMode,
+        };
         localStorage.setItem(STORAGE_KEY, JSON.stringify(draft));
         setSaveStatus("一時保存済み");
       } catch {
         setSaveStatus("一時保存できません");
       }
-    }, 200);
-    setSaveStatus("保存中...");
+    }, 1500);
     return () => window.clearTimeout(timeout);
-  }, [activeIndex, format, lyrics, timings]);
+  }, [activeIndex, activeSegmentIndex, format, lyrics, segmentTimings, timingMode, timings]);
 
   useEffect(() => {
     const container = outputPreviewRef.current;
@@ -675,9 +948,29 @@ export function App() {
           <section className="timing-panel" aria-label="タイミング操作">
             <div className="timing-display">
               <span id="currentTime">{formatLrcTime(currentTime)}</span>
-              <strong id="activeLine">{activeLine}</strong>
+              <strong id="activeLine">
+                {timingMode === "line" || !activeTokens.length ? activeLine : (
+                  <>
+                    {activeTokens.map((token, index) => (
+                      <span
+                        key={`${index}-${token}`}
+                        className={`active-token${index === activeSegmentIndex ? " is-current" : ""}`}
+                      >
+                        {token}
+                      </span>
+                    ))}
+                  </>
+                )}
+              </strong>
             </div>
-            <button className="tap-zone" type="button" onMouseDown={preventButtonMouseFocus} onClick={stampCurrentLine}>
+            <button
+              className="tap-zone"
+              type="button"
+              onMouseDown={preventButtonMouseFocus}
+              onPointerDown={handleStampPointerDown}
+              onTouchStart={handleStampTouchStart}
+              onClick={handleStampClick}
+            >
               <span>タップで打刻</span>
             </button>
             <div className="control-grid">
@@ -692,6 +985,20 @@ export function App() {
             </div>
             <div className="options-row">
               <label>
+                打刻単位
+                <select
+                  value={timingMode}
+                  onChange={(event) => {
+                    setTimingMode(event.target.value as TimingMode);
+                    activeSegmentIndexRef.current = 0;
+                    setActiveSegmentIndex(0);
+                  }}
+                >
+                  <option value="line">行</option>
+                  <option value="segment">詳細</option>
+                </select>
+              </label>
+              <label>
                 形式
                 <select value={format} onChange={(event) => setFormat(event.target.value as OutputFormat)}>
                   <option value="lrc">LRC</option>
@@ -700,6 +1007,7 @@ export function App() {
                   <option value="srt">SRT</option>
                 </select>
               </label>
+              <button type="button" onMouseDown={preventButtonMouseFocus} onClick={insertGapAfterCurrentLine}>間奏追加</button>
               <button type="button" onMouseDown={preventButtonMouseFocus} onClick={clearTimings}>時刻クリア</button>
             </div>
           </section>
