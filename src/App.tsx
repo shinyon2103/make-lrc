@@ -1202,6 +1202,12 @@ export function App() {
           </div>
         </section>
       </section>
+      <footer className="site-footer">
+        <span>© {new Date().getFullYear()} しにょーん</span>
+        <a href="https://shinyo-n.com" target="_blank" rel="noreferrer">
+          {language === "ja" ? "しにょーんのプロフィール" : "Creator profile"}
+        </a>
+      </footer>
     </main>
   );
 }

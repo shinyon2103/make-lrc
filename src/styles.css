@@ -89,7 +89,8 @@ button:active:not(:disabled) {
 button:focus-visible,
 select:focus-visible,
 textarea:focus-visible,
-.tap-zone:focus-visible {
+.tap-zone:focus-visible,
+.site-footer a:focus-visible {
   outline: 3px solid color-mix(in srgb, var(--focus), transparent 35%);
   outline-offset: 2px;
 }
@@ -532,6 +533,28 @@ select {
 .output-empty {
   padding: 12px;
   color: var(--muted);
+}
+
+.site-footer {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px 18px;
+  flex-wrap: wrap;
+  padding: 20px 12px 4px;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.site-footer a {
+  border-radius: 4px;
+  color: var(--accent-strong);
+  font-weight: 700;
+  text-underline-offset: 3px;
+}
+
+.site-footer a:hover {
+  color: var(--accent);
 }
 
 @media (max-width: 780px) {
