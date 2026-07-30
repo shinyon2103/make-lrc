@@ -12,6 +12,7 @@ const RETAKE_MARGIN_SECONDS = 2.5;
 const SEEK_STEP_SECONDS = 3;
 const DEFAULT_END_TIME_SECONDS = 4;
 const MIN_TIMING_INTERVAL_SECONDS = 0.001;
+const TEMPO_RATES = [0.5, 0.75, 1, 1.25, 1.5, 2] as const;
 const GAP_LINE_TEXT = "♪ 間奏";
 const ATTACHED_KANA_PATTERN = /^[ぁぃぅぇぉっゃゅょゎァィゥェォッャュョヮゕゖヶー]$/;
 const OPENING_BRACKETS = new Set(Array.from("「『（([［｛{【〈《〔〝“‘"));
@@ -35,6 +36,7 @@ const AUDIO_FILE_EXTENSIONS = new Set([
 
 type OutputFormat = "project-k-json" | "lrc" | "enhanced-lrc" | "webvtt" | "srt";
 type TimingMode = "line" | "segment";
+type DetailedEndPolicy = "line-fallback" | "same-line-only";
 type Language = "ja" | "en";
 type ThemeMode = "light" | "dark";
 
@@ -72,6 +74,12 @@ const TEXT = {
     timingUnit: "打刻単位",
     line: "行",
     detail: "詳細",
+    detailedEndPolicy: "詳細終了時刻",
+    lineFallback: "次の行まで補完",
+    sameLineOnly: "同じ行内のみ",
+    tempo: "テンポ",
+    tempoPitchNote: "ピッチ固定",
+    timingWarningTitle: "タイミングの矛盾",
     format: "形式",
     addGap: "間奏を追加",
     clearAllTimings: "全時刻クリア",
@@ -116,6 +124,12 @@ const TEXT = {
     timingUnit: "Timing unit",
     line: "Line",
     detail: "Detail",
+    detailedEndPolicy: "Detail end times",
+    lineFallback: "Continue to next line",
+    sameLineOnly: "Same line only",
+    tempo: "Tempo",
+    tempoPitchNote: "Pitch preserved",
+    timingWarningTitle: "Timing contradiction",
     format: "Format",
     addGap: "Add gap",
     clearAllTimings: "Clear all timings",
@@ -135,6 +149,16 @@ function readStoredLanguage(): Language {
 
 function readStoredTheme(): ThemeMode {
   return localStorage.getItem(THEME_STORAGE_KEY) === "dark" ? "dark" : "light";
+}
+
+function normalizeTempoRate(value: unknown) {
+  return typeof value === "number" && TEMPO_RATES.includes(value as typeof TEMPO_RATES[number])
+    ? value
+    : 1;
+}
+
+function normalizeDetailedEndPolicy(value: unknown): DetailedEndPolicy {
+  return value === "same-line-only" ? "same-line-only" : "line-fallback";
 }
 
 function translateStatus(status: string, language: Language) {
@@ -170,6 +194,8 @@ type Draft = {
   activeSegmentIndex?: number;
   format: OutputFormat;
   timingMode?: TimingMode;
+  detailedEndPolicy?: DetailedEndPolicy;
+  tempoRate?: number;
 };
 
 type OutputRow = {
@@ -368,7 +394,88 @@ type OutputBuildOptions = {
   compactEnhanced?: boolean;
   timingMode?: TimingMode;
   audioName?: string;
+  detailedEndPolicy?: DetailedEndPolicy;
 };
+
+type TimingWarning = {
+  scope: "segment" | "line";
+  lineIndex: number;
+  segmentIndex: number;
+  previousSegmentIndex: number;
+  currentStart: number;
+  previousEnd: number;
+  currentText: string;
+  previousText: string;
+};
+
+function getTimingWarnings(
+  lines: string[],
+  timings: Array<number | undefined>,
+  endTimings: Array<number | undefined>,
+  segmentTimings: Array<Array<number | undefined>>,
+  segmentEndTimings: Array<Array<number | undefined>>,
+  timingMode: TimingMode,
+): TimingWarning[] {
+  const warnings: TimingWarning[] = [];
+  if (timingMode === "segment") {
+    lines.forEach((line, lineIndex) => {
+      const tokens = tokenizeForMode(line, timingMode);
+      const starts = segmentTimings[lineIndex] ?? [];
+      const ends = segmentEndTimings[lineIndex] ?? [];
+      for (let segmentIndex = 1; segmentIndex < tokens.length; segmentIndex += 1) {
+        const currentStart = starts[segmentIndex];
+        const previousEnd = ends[segmentIndex - 1];
+        if (Number.isFinite(currentStart) && Number.isFinite(previousEnd)
+          && (currentStart ?? 0) < (previousEnd ?? 0)) {
+          warnings.push({
+            scope: "segment",
+            lineIndex,
+            segmentIndex,
+            previousSegmentIndex: segmentIndex - 1,
+            currentStart: currentStart ?? 0,
+            previousEnd: previousEnd ?? 0,
+            currentText: tokens[segmentIndex] ?? "",
+            previousText: tokens[segmentIndex - 1] ?? "",
+          });
+        }
+      }
+    });
+  }
+
+  for (let lineIndex = 1; lineIndex < lines.length; lineIndex += 1) {
+    const currentStart = timings[lineIndex];
+    const previousEnd = endTimings[lineIndex - 1];
+    if (Number.isFinite(currentStart) && Number.isFinite(previousEnd)
+      && (currentStart ?? 0) < (previousEnd ?? 0)) {
+      warnings.push({
+        scope: "line",
+        lineIndex,
+        segmentIndex: 0,
+        previousSegmentIndex: 0,
+        currentStart: currentStart ?? 0,
+        previousEnd: previousEnd ?? 0,
+        currentText: lines[lineIndex] ?? "",
+        previousText: lines[lineIndex - 1] ?? "",
+      });
+    }
+  }
+
+  return warnings;
+}
+
+function formatTimingWarning(warning: TimingWarning, language: Language) {
+  if (warning.scope === "segment") {
+    if (language === "en") {
+      return `Line ${warning.lineIndex + 1}: character ${warning.segmentIndex + 1} (${warning.currentText}) starts at ${formatLrcTime(warning.currentStart)}, before character ${warning.previousSegmentIndex + 1} (${warning.previousText}) ends at ${formatLrcTime(warning.previousEnd)}.`;
+    }
+    return `行 ${warning.lineIndex + 1}「${warning.currentText}」の文字 ${warning.segmentIndex + 1} の開始 ${formatLrcTime(warning.currentStart)} が、直前の文字 ${warning.previousSegmentIndex + 1}「${warning.previousText}」の終了 ${formatLrcTime(warning.previousEnd)} より前です。`;
+  }
+
+  if (language === "en") {
+    return `Line ${warning.lineIndex + 1} (${warning.currentText}) starts at ${formatLrcTime(warning.currentStart)}, before the previous line (${warning.previousText}) ends at ${formatLrcTime(warning.previousEnd)}.`;
+  }
+  return `行 ${warning.lineIndex + 1}「${warning.currentText}」の開始 ${formatLrcTime(warning.currentStart)} が、前の行「${warning.previousText}」の終了 ${formatLrcTime(warning.previousEnd)} より前です。`;
+}
 
 function toProjectKMilliseconds(seconds: number) {
   return Math.max(0, Math.round(seconds * 1000));
@@ -384,11 +491,22 @@ function buildProjectKJsonOutput(
   endTimings: Array<number | undefined>,
   segmentTimings: Array<Array<number | undefined>>,
   segmentEndTimings: Array<Array<number | undefined>>,
-  options: Pick<OutputBuildOptions, "timingMode" | "audioName"> = {},
+  options: Pick<OutputBuildOptions, "timingMode" | "audioName" | "detailedEndPolicy"> = {},
 ): ProjectKJsonBuildResult {
   const errors: string[] = [];
   const timingMode = options.timingMode ?? "line";
+  const detailedEndPolicy = options.detailedEndPolicy ?? "line-fallback";
   const rows = getRowsWithSegments(lines, timings, endTimings, segmentTimings, segmentEndTimings);
+
+  const timingWarnings = getTimingWarnings(
+    lines,
+    timings,
+    endTimings,
+    segmentTimings,
+    segmentEndTimings,
+    timingMode,
+  );
+  errors.push(...timingWarnings.map((warning) => formatTimingWarning(warning, "ja")));
 
   if (!lines.length) {
     return { output: "", errors: ["歌詞が入力されていません。"] };
@@ -408,7 +526,15 @@ function buildProjectKJsonOutput(
     const start = Number.isFinite(row.time) ? row.time ?? 0 : 0;
     const nextLineStart = rows[index + 1]?.time;
     const explicitLineEnd = row.endTime;
-    if (Number.isFinite(explicitLineEnd) && (explicitLineEnd ?? 0) <= start) {
+
+    const tokens = tokenizeForMode(row.text, timingMode);
+    const explicitLineEndIsValid = Number.isFinite(explicitLineEnd) && (explicitLineEnd ?? 0) > start;
+    const finalSegmentStart = row.segmentTimings[tokens.length - 1];
+    const finalSegmentEnd = row.segmentEndTimings[tokens.length - 1];
+    const finalSegmentEndIsValid = Number.isFinite(finalSegmentStart)
+      && Number.isFinite(finalSegmentEnd)
+      && (finalSegmentEnd ?? 0) > (finalSegmentStart ?? start);
+    if (Number.isFinite(explicitLineEnd) && !explicitLineEndIsValid) {
       errors.push(`行 ${index + 1}: 終了時刻は開始時刻より後にしてください。`);
     }
 
@@ -416,16 +542,29 @@ function buildProjectKJsonOutput(
     const inferredLineEnd = hasNextLineStart
       ? nextLineStart ?? start + DEFAULT_END_TIME_SECONDS
       : start + DEFAULT_END_TIME_SECONDS;
-    const lineEnd = Number.isFinite(explicitLineEnd) && (explicitLineEnd ?? 0) > start
-      ? explicitLineEnd ?? inferredLineEnd
-      : Math.max(start + MIN_TIMING_INTERVAL_SECONDS, inferredLineEnd);
-    const lineEndIsExact = Number.isFinite(explicitLineEnd) && (explicitLineEnd ?? 0) > start;
-    const tokens = tokenizeForMode(row.text, timingMode);
+    const lineEnd = timingMode === "segment" && detailedEndPolicy === "same-line-only"
+      ? explicitLineEndIsValid
+        ? explicitLineEnd
+        : finalSegmentEndIsValid
+          ? finalSegmentEnd
+          : undefined
+      : explicitLineEndIsValid
+        ? explicitLineEnd
+        : Math.max(start + MIN_TIMING_INTERVAL_SECONDS, inferredLineEnd);
+    if (!Number.isFinite(lineEnd)) {
+      errors.push(`行 ${index + 1}: 同じ行内で終了時刻を記録してください。`);
+    }
+    const safeLineEnd = Number.isFinite(lineEnd)
+      ? lineEnd ?? start + MIN_TIMING_INTERVAL_SECONDS
+      : start + MIN_TIMING_INTERVAL_SECONDS;
+    const lineEndIsExact = timingMode === "segment" && detailedEndPolicy === "same-line-only"
+      ? explicitLineEndIsValid || finalSegmentEndIsValid
+      : explicitLineEndIsValid;
     const lineSegments = timingMode === "line"
       ? [{
         id: `line-${String(index + 1).padStart(4, "0")}-segment-0001`,
         startTimeMs: toProjectKMilliseconds(start),
-        endTimeMs: toProjectKMilliseconds(lineEnd),
+        endTimeMs: toProjectKMilliseconds(safeLineEnd),
         text: row.text,
         granularity: "line" as const,
         timingQuality: lineEndIsExact ? "exact" as const : "inferred" as const,
@@ -441,21 +580,43 @@ function buildProjectKJsonOutput(
           errors.push(`行 ${index + 1} セグメント ${segmentIndex + 1}: 開始時刻は前のセグメント以降にしてください。`);
         }
         const safeSegmentStart = Number.isFinite(segmentStart) ? segmentStart ?? start : start;
-        if (safeSegmentStart < start || safeSegmentStart >= lineEnd) {
+        if (safeSegmentStart < start || safeSegmentStart >= safeLineEnd) {
           errors.push(`行 ${index + 1} セグメント ${segmentIndex + 1}: 行の時間範囲内にしてください。`);
         }
         const nextSegmentStart = row.segmentTimings[segmentIndex + 1];
         const explicitSegmentEnd = row.segmentEndTimings[segmentIndex];
-        if (Number.isFinite(explicitSegmentEnd) && (explicitSegmentEnd ?? 0) <= safeSegmentStart) {
+        const explicitSegmentEndIsValid = Number.isFinite(explicitSegmentEnd) && (explicitSegmentEnd ?? 0) > safeSegmentStart;
+        if (Number.isFinite(explicitSegmentEnd) && !explicitSegmentEndIsValid) {
           errors.push(`行 ${index + 1} セグメント ${segmentIndex + 1}: 終了時刻は開始時刻より後にしてください。`);
         }
-        const inferredSegmentEnd = Number.isFinite(nextSegmentStart) && (nextSegmentStart ?? 0) > safeSegmentStart
-          ? nextSegmentStart ?? lineEnd
-          : lineEnd;
-        const segmentEnd = Number.isFinite(explicitSegmentEnd) && (explicitSegmentEnd ?? 0) > safeSegmentStart
-          ? explicitSegmentEnd ?? inferredSegmentEnd
-          : Math.max(safeSegmentStart + MIN_TIMING_INTERVAL_SECONDS, inferredSegmentEnd);
-        if (segmentEnd > lineEnd + MIN_TIMING_INTERVAL_SECONDS) {
+        const nextSegmentStartIsValid = Number.isFinite(nextSegmentStart) && (nextSegmentStart ?? 0) > safeSegmentStart;
+        const inferredSegmentEnd = nextSegmentStartIsValid
+          ? nextSegmentStart ?? safeLineEnd
+          : safeLineEnd;
+        let segmentEnd = inferredSegmentEnd;
+        let segmentEndIsExact = false;
+        if (detailedEndPolicy === "same-line-only") {
+          if (nextSegmentStartIsValid) {
+            segmentEnd = nextSegmentStart ?? safeLineEnd;
+            segmentEndIsExact = explicitSegmentEndIsValid
+              && Math.abs((explicitSegmentEnd ?? 0) - segmentEnd) < MIN_TIMING_INTERVAL_SECONDS;
+          } else if (explicitSegmentEndIsValid) {
+            segmentEnd = explicitSegmentEnd ?? safeLineEnd;
+            segmentEndIsExact = true;
+          } else if (Number.isFinite(lineEnd)) {
+            segmentEnd = safeLineEnd;
+            segmentEndIsExact = lineEndIsExact;
+          } else {
+            errors.push(`行 ${index + 1} セグメント ${segmentIndex + 1}: 同じ行内で終了時刻を記録してください。`);
+            segmentEnd = safeSegmentStart + MIN_TIMING_INTERVAL_SECONDS;
+          }
+        } else if (explicitSegmentEndIsValid) {
+          segmentEnd = explicitSegmentEnd ?? inferredSegmentEnd;
+          segmentEndIsExact = true;
+        } else {
+          segmentEnd = Math.max(safeSegmentStart + MIN_TIMING_INTERVAL_SECONDS, inferredSegmentEnd);
+        }
+        if (segmentEnd > safeLineEnd + MIN_TIMING_INTERVAL_SECONDS) {
           errors.push(`行 ${index + 1} セグメント ${segmentIndex + 1}: 行の終了時刻の範囲内にしてください。`);
         }
         return {
@@ -465,9 +626,7 @@ function buildProjectKJsonOutput(
           text: token,
           granularity: "fine" as const,
           fineUnit: getFineUnit(row.text),
-          timingQuality: Number.isFinite(explicitSegmentEnd) && (explicitSegmentEnd ?? 0) > safeSegmentStart
-            ? "exact" as const
-            : "inferred" as const,
+          timingQuality: segmentEndIsExact ? "exact" as const : "inferred" as const,
         };
       });
 
@@ -482,7 +641,7 @@ function buildProjectKJsonOutput(
     return {
       id: `line-${String(index + 1).padStart(4, "0")}`,
       startTimeMs: toProjectKMilliseconds(start),
-      endTimeMs: toProjectKMilliseconds(lineEnd),
+      endTimeMs: toProjectKMilliseconds(safeLineEnd),
       text: row.text,
       timingQuality: lineEndIsExact && allSegmentsExact ? "exact" as const : "mixed" as const,
       displayMode: timingMode === "line" ? "line" as const : "fine" as const,
@@ -600,7 +759,7 @@ function buildConvertedOutput(
   segmentTimings: Array<Array<number | undefined>>,
   segmentEndTimings: Array<Array<number | undefined>>,
   format: OutputFormat,
-  options: Pick<OutputBuildOptions, "timingMode" | "audioName"> = {},
+  options: Pick<OutputBuildOptions, "timingMode" | "audioName" | "detailedEndPolicy"> = {},
 ) {
   const blocks = buildOutputPreviewBlocks(lines, timings, endTimings, segmentTimings, segmentEndTimings, format, options);
   const separator = format === "srt" || format === "webvtt" ? "\n\n" : "\n";
@@ -625,6 +784,8 @@ function readDraft(): Draft | null {
       timingMode: savedTimingMode === "word" || savedTimingMode === "char"
         ? "segment"
         : draft.timingMode ?? "line",
+      detailedEndPolicy: normalizeDetailedEndPolicy(draft.detailedEndPolicy),
+      tempoRate: normalizeTempoRate(draft.tempoRate),
     };
   } catch {
     return null;
@@ -652,6 +813,7 @@ export function App() {
   const initialTimingMode = canFormatUseDetailedTiming(initialFormat)
     ? initialDraft?.timingMode ?? "line"
     : "line";
+  const initialDetailedEndPolicy = initialDraft?.detailedEndPolicy ?? "line-fallback";
   const initialActiveSegmentIndex = initialTimingMode === "line" ? 0 : initialDraft?.activeSegmentIndex ?? 0;
   const [lyrics, setLyrics] = useState(initialDraft?.lyrics ?? "");
   const [lines, setLines] = useState(() => parseLines(initialDraft?.lyrics ?? ""));
@@ -669,6 +831,8 @@ export function App() {
   const [redoStack, setRedoStack] = useState<Snapshot[]>([]);
   const [format, setFormat] = useState<OutputFormat>(initialFormat);
   const [timingMode, setTimingMode] = useState<TimingMode>(initialTimingMode);
+  const [detailedEndPolicy, setDetailedEndPolicy] = useState<DetailedEndPolicy>(initialDetailedEndPolicy);
+  const [tempoRate, setTempoRate] = useState(() => normalizeTempoRate(initialDraft?.tempoRate));
   const [saveStatus, setSaveStatus] = useState(initialDraft ? "一時保存を復元" : "未保存");
   const [language, setLanguage] = useState<Language>(readStoredLanguage);
   const [theme, setTheme] = useState<ThemeMode>(readStoredTheme);
@@ -697,13 +861,18 @@ export function App() {
       compactEnhanced: true,
       timingMode: effectiveTimingMode,
       audioName,
+      detailedEndPolicy,
     }),
-    [audioName, effectiveTimingMode, endTimings, format, lines, segmentEndTimings, segmentTimings, timings],
+    [audioName, detailedEndPolicy, effectiveTimingMode, endTimings, format, lines, segmentEndTimings, segmentTimings, timings],
   );
   const activeLine = lines[activeIndex] ?? text.enterLyrics;
   const activeTokens = useMemo(
     () => tokenizeForMode(lines[activeIndex] ?? "", effectiveTimingMode),
     [activeIndex, effectiveTimingMode, lines],
+  );
+  const timingWarnings = useMemo(
+    () => getTimingWarnings(lines, timings, endTimings, segmentTimings, segmentEndTimings, effectiveTimingMode),
+    [effectiveTimingMode, endTimings, lines, segmentEndTimings, segmentTimings, timings],
   );
 
   useEffect(() => {
@@ -768,6 +937,25 @@ export function App() {
       setCurrentTime(nextTime);
     }
   }, []);
+
+  const applyAudioTempo = useCallback(() => {
+    const audio = audioRef.current;
+    if (!audio) return;
+    const audioWithPitch = audio as HTMLAudioElement & {
+      mozPreservesPitch?: boolean;
+      preservesPitch?: boolean;
+      webkitPreservesPitch?: boolean;
+    };
+    audioWithPitch.preservesPitch = true;
+    audioWithPitch.mozPreservesPitch = true;
+    audioWithPitch.webkitPreservesPitch = true;
+    audio.defaultPlaybackRate = tempoRate;
+    audio.playbackRate = tempoRate;
+  }, [tempoRate]);
+
+  useEffect(() => {
+    applyAudioTempo();
+  }, [applyAudioTempo, audioUrl]);
 
   const stopTimeLoop = useCallback(() => {
     if (animationFrameRef.current !== null) {
@@ -1119,6 +1307,7 @@ export function App() {
     const output = buildConvertedOutput(lines, timings, endTimings, segmentTimings, segmentEndTimings, format, {
       timingMode: effectiveTimingMode,
       audioName,
+      detailedEndPolicy,
     });
     if (!output) return;
     try {
@@ -1134,12 +1323,13 @@ export function App() {
       textarea.remove();
       setSaveStatus("コピーしました");
     }
-  }, [audioName, effectiveTimingMode, endTimings, format, lines, segmentEndTimings, segmentTimings, timings]);
+  }, [audioName, detailedEndPolicy, effectiveTimingMode, endTimings, format, lines, segmentEndTimings, segmentTimings, timings]);
 
   const downloadOutput = useCallback(() => {
     const output = buildConvertedOutput(lines, timings, endTimings, segmentTimings, segmentEndTimings, format, {
       timingMode: effectiveTimingMode,
       audioName,
+      detailedEndPolicy,
     });
     if (!output) return;
     const extension = format === "project-k-json" ? "lyrics.json" : format === "webvtt" ? "vtt" : format === "srt" ? "srt" : "lrc";
@@ -1151,7 +1341,7 @@ export function App() {
     anchor.download = `lyrics.${extension}`;
     anchor.click();
     URL.revokeObjectURL(url);
-  }, [audioName, effectiveTimingMode, endTimings, format, lines, segmentEndTimings, segmentTimings, timings]);
+  }, [audioName, detailedEndPolicy, effectiveTimingMode, endTimings, format, lines, segmentEndTimings, segmentTimings, timings]);
 
   const loadAudioFile = useCallback((file: File) => {
     if (!isLikelyAudioFile(file)) {
@@ -1181,6 +1371,8 @@ export function App() {
           activeSegmentIndex,
           format,
           timingMode,
+          detailedEndPolicy,
+          tempoRate,
         };
         localStorage.setItem(STORAGE_KEY, JSON.stringify(draft));
         setSaveStatus("一時保存済み");
@@ -1189,7 +1381,7 @@ export function App() {
       }
     }, 1500);
     return () => window.clearTimeout(timeout);
-  }, [activeIndex, activeSegmentIndex, endTimings, format, lyrics, segmentEndTimings, segmentTimings, timingMode, timings]);
+  }, [activeIndex, activeSegmentIndex, detailedEndPolicy, endTimings, format, lyrics, segmentEndTimings, segmentTimings, tempoRate, timingMode, timings]);
 
   useEffect(() => {
     const container = outputPreviewRef.current;
@@ -1218,7 +1410,10 @@ export function App() {
       syncCurrentTime(true);
     };
     const onSeeked = () => syncCurrentTime(true);
-    const onLoadedMetadata = () => syncCurrentTime(true);
+    const onLoadedMetadata = () => {
+      applyAudioTempo();
+      syncCurrentTime(true);
+    };
 
     audio.addEventListener("play", onPlay);
     audio.addEventListener("pause", onPause);
@@ -1232,7 +1427,7 @@ export function App() {
       audio.removeEventListener("loadedmetadata", onLoadedMetadata);
       stopTimeLoop();
     };
-  }, [startTimeLoop, stopTimeLoop, syncCurrentTime]);
+  }, [applyAudioTempo, startTimeLoop, stopTimeLoop, syncCurrentTime]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -1422,8 +1617,24 @@ export function App() {
             preload="metadata"
             src={audioUrl}
             onTimeUpdate={(event) => setCurrentTime(event.currentTarget.currentTime)}
-            onLoadedMetadata={() => syncCurrentTime(true)}
+            onLoadedMetadata={() => {
+              applyAudioTempo();
+              syncCurrentTime(true);
+            }}
           />
+          <label className="tempo-control">
+            {text.tempo}
+            <select
+              aria-label={text.tempo}
+              value={String(tempoRate)}
+              onChange={(event) => setTempoRate(normalizeTempoRate(Number(event.target.value)))}
+            >
+              {TEMPO_RATES.map((rate) => (
+                <option key={rate} value={rate}>{rate}x</option>
+              ))}
+            </select>
+            <span>{text.tempoPitchNote}</span>
+          </label>
         </section>
 
         <section className="editor-grid">
@@ -1496,6 +1707,18 @@ export function App() {
                   <option value="segment">{text.detail}</option>
                 </select>
               </label>
+              {effectiveTimingMode === "segment" && (
+                <label>
+                  {text.detailedEndPolicy}
+                  <select
+                    value={detailedEndPolicy}
+                    onChange={(event) => setDetailedEndPolicy(normalizeDetailedEndPolicy(event.target.value))}
+                  >
+                    <option value="line-fallback">{text.lineFallback}</option>
+                    <option value="same-line-only">{text.sameLineOnly}</option>
+                  </select>
+                </label>
+              )}
               <label>
                 {text.format}
                 <select
@@ -1520,6 +1743,18 @@ export function App() {
               <button type="button" onMouseDown={preventButtonMouseFocus} onClick={insertGapAfterCurrentLine}>{text.addGap}</button>
               <button type="button" className="danger-action" onMouseDown={preventButtonMouseFocus} onClick={clearTimings}>{text.clearAllTimings}</button>
             </div>
+            {timingWarnings.length > 0 && (
+              <div className="timing-warning" role="alert">
+                <strong>{text.timingWarningTitle}</strong>
+                <ul>
+                  {timingWarnings.map((warning, index) => (
+                    <li key={`${warning.scope}-${warning.lineIndex}-${warning.segmentIndex}-${index}`}>
+                      {formatTimingWarning(warning, language)}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
           </section>
         </section>
 

@@ -484,6 +484,33 @@ audio {
   gap: 8px;
 }
 
+.tempo-control {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.tempo-control span {
+  font-size: 0.82rem;
+}
+
+.timing-warning {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--danger-line);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--danger-line) 12%, var(--surface));
+  color: var(--danger-ink);
+  font-size: 0.86rem;
+}
+
+.timing-warning ul {
+  margin: 6px 0 0;
+  padding-left: 1.25rem;
+}
+
 .danger-action {
   border-color: var(--danger-line);
   color: var(--danger-ink);
