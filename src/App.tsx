@@ -36,7 +36,7 @@ const AUDIO_FILE_EXTENSIONS = new Set([
 
 type OutputFormat = "project-k-json" | "lrc" | "enhanced-lrc" | "webvtt" | "srt";
 type TimingMode = "line" | "segment";
-type DetailedEndPolicy = "line-fallback" | "same-line-only";
+type DetailedEndPolicy = "same-line-only" | "none";
 type Language = "ja" | "en";
 type ThemeMode = "light" | "dark";
 
@@ -75,8 +75,8 @@ const TEXT = {
     line: "行",
     detail: "詳細",
     detailedEndPolicy: "詳細終了時刻",
-    lineFallback: "次の行まで補完",
     sameLineOnly: "同じ行内のみ",
+    noCompletion: "補完しない",
     tempo: "テンポ",
     tempoPitchNote: "ピッチ固定",
     timingWarningTitle: "タイミングの矛盾",
@@ -87,7 +87,7 @@ const TEXT = {
     output: "出力",
     outputEmpty: "出力はここに表示されます。",
     outputFormatLossNotice: "この形式では終了時刻または詳細なタイミングが失われます。正規データは Project K JSON で保存してください。",
-    jsonTimingIncomplete: "JSONを出力するには、すべての行の開始時刻を打刻してください。終了時刻がない区間は推定して出力します。",
+    jsonTimingIncomplete: "JSONを出力するには、すべての行の開始時刻と必要な終了時刻を打刻してください。",
     jsonValidationError: "JSONを出力できません",
     lineCount: "行",
   },
@@ -125,8 +125,8 @@ const TEXT = {
     line: "Line",
     detail: "Detail",
     detailedEndPolicy: "Detail end times",
-    lineFallback: "Continue to next line",
     sameLineOnly: "Same line only",
+    noCompletion: "Do not complete",
     tempo: "Tempo",
     tempoPitchNote: "Pitch preserved",
     timingWarningTitle: "Timing contradiction",
@@ -137,7 +137,7 @@ const TEXT = {
     output: "Output",
     outputEmpty: "Output will appear here.",
     outputFormatLossNotice: "This format loses end times or detailed timing. Keep Project K JSON as the canonical data.",
-    jsonTimingIncomplete: "Stamp a start time for every line to export JSON. Missing end times will be inferred.",
+    jsonTimingIncomplete: "Stamp the required start and end times to export JSON.",
     jsonValidationError: "Could not export JSON",
     lineCount: " lines",
   },
@@ -158,7 +158,7 @@ function normalizeTempoRate(value: unknown) {
 }
 
 function normalizeDetailedEndPolicy(value: unknown): DetailedEndPolicy {
-  return value === "same-line-only" ? "same-line-only" : "line-fallback";
+  return value === "none" ? "none" : "same-line-only";
 }
 
 function translateStatus(status: string, language: Language) {
@@ -495,7 +495,7 @@ function buildProjectKJsonOutput(
 ): ProjectKJsonBuildResult {
   const errors: string[] = [];
   const timingMode = options.timingMode ?? "line";
-  const detailedEndPolicy = options.detailedEndPolicy ?? "line-fallback";
+  const detailedEndPolicy = options.detailedEndPolicy ?? "same-line-only";
   const rows = getRowsWithSegments(lines, timings, endTimings, segmentTimings, segmentEndTimings);
 
   const timingWarnings = getTimingWarnings(
@@ -542,7 +542,7 @@ function buildProjectKJsonOutput(
     const inferredLineEnd = hasNextLineStart
       ? nextLineStart ?? start + DEFAULT_END_TIME_SECONDS
       : start + DEFAULT_END_TIME_SECONDS;
-    const lineEnd = timingMode === "segment" && detailedEndPolicy === "same-line-only"
+    const lineEnd = timingMode === "segment"
       ? explicitLineEndIsValid
         ? explicitLineEnd
         : finalSegmentEndIsValid
@@ -551,13 +551,16 @@ function buildProjectKJsonOutput(
       : explicitLineEndIsValid
         ? explicitLineEnd
         : Math.max(start + MIN_TIMING_INTERVAL_SECONDS, inferredLineEnd);
+    const missingEndMessage = detailedEndPolicy === "none"
+      ? "終了時刻を記録してください。"
+      : "同じ行内で終了時刻を記録してください。";
     if (!Number.isFinite(lineEnd)) {
-      errors.push(`行 ${index + 1}: 同じ行内で終了時刻を記録してください。`);
+      errors.push(`行 ${index + 1}: ${missingEndMessage}`);
     }
     const safeLineEnd = Number.isFinite(lineEnd)
       ? lineEnd ?? start + MIN_TIMING_INTERVAL_SECONDS
       : start + MIN_TIMING_INTERVAL_SECONDS;
-    const lineEndIsExact = timingMode === "segment" && detailedEndPolicy === "same-line-only"
+    const lineEndIsExact = timingMode === "segment"
       ? explicitLineEndIsValid || finalSegmentEndIsValid
       : explicitLineEndIsValid;
     const lineSegments = timingMode === "line"
@@ -608,14 +611,18 @@ function buildProjectKJsonOutput(
             segmentEnd = safeLineEnd;
             segmentEndIsExact = lineEndIsExact;
           } else {
-            errors.push(`行 ${index + 1} セグメント ${segmentIndex + 1}: 同じ行内で終了時刻を記録してください。`);
+            errors.push(`行 ${index + 1} セグメント ${segmentIndex + 1}: ${missingEndMessage}`);
             segmentEnd = safeSegmentStart + MIN_TIMING_INTERVAL_SECONDS;
           }
         } else if (explicitSegmentEndIsValid) {
-          segmentEnd = explicitSegmentEnd ?? inferredSegmentEnd;
+          segmentEnd = explicitSegmentEnd ?? safeLineEnd;
+          segmentEndIsExact = true;
+        } else if (segmentIndex === tokens.length - 1 && explicitLineEndIsValid) {
+          segmentEnd = safeLineEnd;
           segmentEndIsExact = true;
         } else {
-          segmentEnd = Math.max(safeSegmentStart + MIN_TIMING_INTERVAL_SECONDS, inferredSegmentEnd);
+          errors.push(`行 ${index + 1} セグメント ${segmentIndex + 1}: ${missingEndMessage}`);
+          segmentEnd = safeSegmentStart + MIN_TIMING_INTERVAL_SECONDS;
         }
         if (hasKnownLineEnd && segmentEnd > safeLineEnd + MIN_TIMING_INTERVAL_SECONDS) {
           errors.push(`行 ${index + 1} セグメント ${segmentIndex + 1}: 行の終了時刻の範囲内にしてください。`);
@@ -653,8 +660,8 @@ function buildProjectKJsonOutput(
   if (errors.length) return { output: "", errors };
 
   const hasExactEnd = documentLines.every((line) => line.timingQuality === "exact");
-  const endTimePolicy = timingMode === "segment" && detailedEndPolicy === "same-line-only"
-    ? "same-line-only"
+  const endTimePolicy = timingMode === "segment"
+    ? detailedEndPolicy
     : "next-start-or-default";
   const document = {
     format: "project-k-lyrics" as const,
@@ -817,7 +824,7 @@ export function App() {
   const initialTimingMode = canFormatUseDetailedTiming(initialFormat)
     ? initialDraft?.timingMode ?? "line"
     : "line";
-  const initialDetailedEndPolicy = initialDraft?.detailedEndPolicy ?? "line-fallback";
+  const initialDetailedEndPolicy = initialDraft?.detailedEndPolicy ?? "same-line-only";
   const initialActiveSegmentIndex = initialTimingMode === "line" ? 0 : initialDraft?.activeSegmentIndex ?? 0;
   const [lyrics, setLyrics] = useState(initialDraft?.lyrics ?? "");
   const [lines, setLines] = useState(() => parseLines(initialDraft?.lyrics ?? ""));
@@ -1718,8 +1725,8 @@ export function App() {
                     value={detailedEndPolicy}
                     onChange={(event) => setDetailedEndPolicy(normalizeDetailedEndPolicy(event.target.value))}
                   >
-                    <option value="line-fallback">{text.lineFallback}</option>
                     <option value="same-line-only">{text.sameLineOnly}</option>
+                    <option value="none">{text.noCompletion}</option>
                   </select>
                 </label>
               )}
