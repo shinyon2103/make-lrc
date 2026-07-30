@@ -580,7 +580,8 @@ function buildProjectKJsonOutput(
           errors.push(`行 ${index + 1} セグメント ${segmentIndex + 1}: 開始時刻は前のセグメント以降にしてください。`);
         }
         const safeSegmentStart = Number.isFinite(segmentStart) ? segmentStart ?? start : start;
-        if (safeSegmentStart < start || safeSegmentStart >= safeLineEnd) {
+        const hasKnownLineEnd = Number.isFinite(lineEnd);
+        if (safeSegmentStart < start || (hasKnownLineEnd && safeSegmentStart >= safeLineEnd)) {
           errors.push(`行 ${index + 1} セグメント ${segmentIndex + 1}: 行の時間範囲内にしてください。`);
         }
         const nextSegmentStart = row.segmentTimings[segmentIndex + 1];
@@ -616,7 +617,7 @@ function buildProjectKJsonOutput(
         } else {
           segmentEnd = Math.max(safeSegmentStart + MIN_TIMING_INTERVAL_SECONDS, inferredSegmentEnd);
         }
-        if (segmentEnd > safeLineEnd + MIN_TIMING_INTERVAL_SECONDS) {
+        if (hasKnownLineEnd && segmentEnd > safeLineEnd + MIN_TIMING_INTERVAL_SECONDS) {
           errors.push(`行 ${index + 1} セグメント ${segmentIndex + 1}: 行の終了時刻の範囲内にしてください。`);
         }
         return {
