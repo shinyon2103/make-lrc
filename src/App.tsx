@@ -10,6 +10,8 @@ const LANGUAGE_STORAGE_KEY = "makelrc.language";
 const THEME_STORAGE_KEY = "makelrc.theme";
 const RETAKE_MARGIN_SECONDS = 2.5;
 const SEEK_STEP_SECONDS = 3;
+const DEFAULT_END_TIME_SECONDS = 4;
+const MIN_TIMING_INTERVAL_SECONDS = 0.001;
 const GAP_LINE_TEXT = "♪ 間奏";
 const ATTACHED_KANA_PATTERN = /^[ぁぃぅぇぉっゃゅょゎァィゥェォッャュョヮゕゖヶー]$/;
 const OPENING_BRACKETS = new Set(Array.from("「『（([［｛{【〈《〔〝“‘"));
@@ -31,7 +33,7 @@ const AUDIO_FILE_EXTENSIONS = new Set([
   "webm",
 ]);
 
-type OutputFormat = "lrc" | "enhanced-lrc" | "webvtt" | "srt";
+type OutputFormat = "project-k-json" | "lrc" | "enhanced-lrc" | "webvtt" | "srt";
 type TimingMode = "line" | "segment";
 type Language = "ja" | "en";
 type ThemeMode = "light" | "dark";
@@ -62,7 +64,7 @@ const TEXT = {
     lyricsPlaceholder: "ここに歌詞を入力または貼り付け。空行は自動で削除されます。",
     timingControls: "タイミング操作",
     enterLyrics: "歌詞を入力してください",
-    tapToStamp: "タップで打刻",
+    tapToStamp: "押下で開始・離して終了",
     previousLine: "前の行",
     nextLine: "次の行",
     seekBack: "3秒戻る",
@@ -76,6 +78,9 @@ const TEXT = {
     outputPreview: "出力プレビュー",
     output: "出力",
     outputEmpty: "出力はここに表示されます。",
+    outputFormatLossNotice: "この形式では終了時刻または詳細なタイミングが失われます。正規データは Project K JSON で保存してください。",
+    jsonTimingIncomplete: "JSONを出力するには、すべての行の開始時刻を打刻してください。終了時刻がない区間は推定して出力します。",
+    jsonValidationError: "JSONを出力できません",
     lineCount: "行",
   },
   en: {
@@ -103,7 +108,7 @@ const TEXT = {
     lyricsPlaceholder: "Type or paste lyrics here. Blank lines are removed automatically.",
     timingControls: "Timing controls",
     enterLyrics: "Enter lyrics to start",
-    tapToStamp: "Tap to stamp",
+    tapToStamp: "Press to start / release to end",
     previousLine: "Previous line",
     nextLine: "Next line",
     seekBack: "Back 3s",
@@ -117,6 +122,9 @@ const TEXT = {
     outputPreview: "Output preview",
     output: "Output",
     outputEmpty: "Output will appear here.",
+    outputFormatLossNotice: "This format loses end times or detailed timing. Keep Project K JSON as the canonical data.",
+    jsonTimingIncomplete: "Stamp a start time for every line to export JSON. Missing end times will be inferred.",
+    jsonValidationError: "Could not export JSON",
     lineCount: " lines",
   },
 } satisfies Record<Language, Record<string, string>>;
@@ -145,7 +153,9 @@ function translateStatus(status: string, language: Language) {
 
 type Snapshot = {
   timings: Array<number | undefined>;
+  endTimings: Array<number | undefined>;
   segmentTimings: Array<Array<number | undefined>>;
+  segmentEndTimings: Array<Array<number | undefined>>;
   activeIndex: number;
   activeSegmentIndex: number;
 };
@@ -153,7 +163,9 @@ type Snapshot = {
 type Draft = {
   lyrics: string;
   timings: Array<number | undefined>;
+  endTimings?: Array<number | undefined>;
   segmentTimings?: Array<Array<number | undefined>>;
+  segmentEndTimings?: Array<Array<number | undefined>>;
   activeIndex: number;
   activeSegmentIndex?: number;
   format: OutputFormat;
@@ -164,13 +176,21 @@ type OutputRow = {
   index: number;
   text: string;
   time: number | undefined;
+  endTime: number | undefined;
   segmentTimings: Array<number | undefined>;
+  segmentEndTimings: Array<number | undefined>;
 };
 
 type OutputPreviewBlock = {
   key: string;
   lines: string[];
   sourceIndex?: number;
+};
+
+type TimingCapture = {
+  lineIndex: number;
+  segmentIndex: number;
+  startTime: number;
 };
 
 function normalizeLyrics(text: string) {
@@ -209,14 +229,27 @@ function formatWebVttTime(seconds: number | undefined) {
   return formatSrtTime(seconds).replace(",", ".");
 }
 
-function getRows(lines: string[], timings: Array<number | undefined>): OutputRow[] {
-  return lines.map((text, index) => ({ index, text, time: timings[index], segmentTimings: [] }));
+function getRows(
+  lines: string[],
+  timings: Array<number | undefined>,
+  endTimings: Array<number | undefined> = [],
+): OutputRow[] {
+  return lines.map((text, index) => ({
+    index,
+    text,
+    time: timings[index],
+    endTime: endTimings[index],
+    segmentTimings: [],
+    segmentEndTimings: [],
+  }));
 }
 
 function getRowsWithSegments(
   lines: string[],
   timings: Array<number | undefined>,
+  endTimings: Array<number | undefined>,
   segmentTimings: Array<Array<number | undefined>>,
+  segmentEndTimings: Array<Array<number | undefined>>,
 ): OutputRow[] {
   return lines.map((text, index) => {
     const firstSegmentTime = segmentTimings[index]?.find((time) => Number.isFinite(time));
@@ -224,7 +257,9 @@ function getRowsWithSegments(
       index,
       text,
       time: Number.isFinite(timings[index]) ? timings[index] : firstSegmentTime,
+      endTime: endTimings[index],
       segmentTimings: segmentTimings[index] ?? [],
+      segmentEndTimings: segmentEndTimings[index] ?? [],
     };
   });
 }
@@ -233,7 +268,10 @@ function getCueRange(rows: OutputRow[], index: number) {
   const row = rows[index];
   const start = Number.isFinite(row.time) ? row.time ?? 0 : 0;
   const nextTime = rows.slice(index + 1).find((candidate) => Number.isFinite(candidate.time))?.time;
-  const end = Math.max(start + 0.2, Number.isFinite(nextTime) ? nextTime ?? 0 : start + 4);
+  const inferredEnd = Number.isFinite(nextTime) ? nextTime ?? 0 : start + DEFAULT_END_TIME_SECONDS;
+  const end = Number.isFinite(row.endTime) && (row.endTime ?? 0) > start
+    ? row.endTime ?? inferredEnd
+    : Math.max(start + 0.2, inferredEnd);
   return { start, end };
 }
 
@@ -250,7 +288,7 @@ function containsJapaneseText(text: string) {
 }
 
 function canFormatUseDetailedTiming(format: OutputFormat) {
-  return format === "enhanced-lrc";
+  return format === "enhanced-lrc" || format === "project-k-json";
 }
 
 function tokenizeCharactersSkippingStandaloneSpaces(text: string) {
@@ -321,14 +359,187 @@ function buildEnhancedLrcLine(row: OutputRow, rows: OutputRow[], index: number) 
   return `[${formatLrcTime(row.time)}]${taggedText}`;
 }
 
+type ProjectKJsonBuildResult = {
+  output: string;
+  errors: string[];
+};
+
+type OutputBuildOptions = {
+  compactEnhanced?: boolean;
+  timingMode?: TimingMode;
+  audioName?: string;
+};
+
+function toProjectKMilliseconds(seconds: number) {
+  return Math.max(0, Math.round(seconds * 1000));
+}
+
+function getFineUnit(text: string): "character" | "word" {
+  return containsJapaneseText(text) || !/\s/.test(text) ? "character" : "word";
+}
+
+function buildProjectKJsonOutput(
+  lines: string[],
+  timings: Array<number | undefined>,
+  endTimings: Array<number | undefined>,
+  segmentTimings: Array<Array<number | undefined>>,
+  segmentEndTimings: Array<Array<number | undefined>>,
+  options: Pick<OutputBuildOptions, "timingMode" | "audioName"> = {},
+): ProjectKJsonBuildResult {
+  const errors: string[] = [];
+  const timingMode = options.timingMode ?? "line";
+  const rows = getRowsWithSegments(lines, timings, endTimings, segmentTimings, segmentEndTimings);
+
+  if (!lines.length) {
+    return { output: "", errors: ["歌詞が入力されていません。"] };
+  }
+
+  rows.forEach((row, index) => {
+    if (!Number.isFinite(row.time) || (row.time ?? -1) < 0) {
+      errors.push(`行 ${index + 1}: 開始時刻を打刻してください。`);
+    }
+    if (index > 0 && Number.isFinite(row.time) && Number.isFinite(rows[index - 1].time)
+      && (row.time ?? 0) < (rows[index - 1].time ?? 0)) {
+      errors.push(`行 ${index + 1}: 開始時刻は前の行以降にしてください。`);
+    }
+  });
+
+  const documentLines = rows.map((row, index) => {
+    const start = Number.isFinite(row.time) ? row.time ?? 0 : 0;
+    const nextLineStart = rows[index + 1]?.time;
+    const explicitLineEnd = row.endTime;
+    if (Number.isFinite(explicitLineEnd) && (explicitLineEnd ?? 0) <= start) {
+      errors.push(`行 ${index + 1}: 終了時刻は開始時刻より後にしてください。`);
+    }
+
+    const hasNextLineStart = Number.isFinite(nextLineStart) && (nextLineStart ?? 0) > start;
+    const inferredLineEnd = hasNextLineStart
+      ? nextLineStart ?? start + DEFAULT_END_TIME_SECONDS
+      : start + DEFAULT_END_TIME_SECONDS;
+    const lineEnd = Number.isFinite(explicitLineEnd) && (explicitLineEnd ?? 0) > start
+      ? explicitLineEnd ?? inferredLineEnd
+      : Math.max(start + MIN_TIMING_INTERVAL_SECONDS, inferredLineEnd);
+    const lineEndIsExact = Number.isFinite(explicitLineEnd) && (explicitLineEnd ?? 0) > start;
+    const tokens = tokenizeForMode(row.text, timingMode);
+    const lineSegments = timingMode === "line"
+      ? [{
+        id: `line-${String(index + 1).padStart(4, "0")}-segment-0001`,
+        startTimeMs: toProjectKMilliseconds(start),
+        endTimeMs: toProjectKMilliseconds(lineEnd),
+        text: row.text,
+        granularity: "line" as const,
+        timingQuality: lineEndIsExact ? "exact" as const : "inferred" as const,
+      }]
+      : tokens.map((token, segmentIndex) => {
+        const segmentStart = row.segmentTimings[segmentIndex];
+        if (!Number.isFinite(segmentStart) || (segmentStart ?? -1) < 0) {
+          errors.push(`行 ${index + 1} セグメント ${segmentIndex + 1}: 開始時刻を打刻してください。`);
+        }
+        if (segmentIndex > 0 && Number.isFinite(segmentStart)
+          && Number.isFinite(row.segmentTimings[segmentIndex - 1])
+          && (segmentStart ?? 0) < (row.segmentTimings[segmentIndex - 1] ?? 0)) {
+          errors.push(`行 ${index + 1} セグメント ${segmentIndex + 1}: 開始時刻は前のセグメント以降にしてください。`);
+        }
+        const safeSegmentStart = Number.isFinite(segmentStart) ? segmentStart ?? start : start;
+        if (safeSegmentStart < start || safeSegmentStart >= lineEnd) {
+          errors.push(`行 ${index + 1} セグメント ${segmentIndex + 1}: 行の時間範囲内にしてください。`);
+        }
+        const nextSegmentStart = row.segmentTimings[segmentIndex + 1];
+        const explicitSegmentEnd = row.segmentEndTimings[segmentIndex];
+        if (Number.isFinite(explicitSegmentEnd) && (explicitSegmentEnd ?? 0) <= safeSegmentStart) {
+          errors.push(`行 ${index + 1} セグメント ${segmentIndex + 1}: 終了時刻は開始時刻より後にしてください。`);
+        }
+        const inferredSegmentEnd = Number.isFinite(nextSegmentStart) && (nextSegmentStart ?? 0) > safeSegmentStart
+          ? nextSegmentStart ?? lineEnd
+          : lineEnd;
+        const segmentEnd = Number.isFinite(explicitSegmentEnd) && (explicitSegmentEnd ?? 0) > safeSegmentStart
+          ? explicitSegmentEnd ?? inferredSegmentEnd
+          : Math.max(safeSegmentStart + MIN_TIMING_INTERVAL_SECONDS, inferredSegmentEnd);
+        if (segmentEnd > lineEnd + MIN_TIMING_INTERVAL_SECONDS) {
+          errors.push(`行 ${index + 1} セグメント ${segmentIndex + 1}: 行の終了時刻の範囲内にしてください。`);
+        }
+        return {
+          id: `line-${String(index + 1).padStart(4, "0")}-segment-${String(segmentIndex + 1).padStart(4, "0")}`,
+          startTimeMs: toProjectKMilliseconds(safeSegmentStart),
+          endTimeMs: toProjectKMilliseconds(segmentEnd),
+          text: token,
+          granularity: "fine" as const,
+          fineUnit: getFineUnit(row.text),
+          timingQuality: Number.isFinite(explicitSegmentEnd) && (explicitSegmentEnd ?? 0) > safeSegmentStart
+            ? "exact" as const
+            : "inferred" as const,
+        };
+      });
+
+    const segmentText = lineSegments.map((segment) => segment.text).join("");
+    if (segmentText !== row.text) {
+      errors.push(`行 ${index + 1}: セグメント本文と行本文が一致しません。`);
+    }
+    if (lineSegments.some((segment) => segment.endTimeMs <= segment.startTimeMs)) {
+      errors.push(`行 ${index + 1}: 終了時刻は開始時刻より後である必要があります。`);
+    }
+    const allSegmentsExact = lineSegments.every((segment) => segment.timingQuality === "exact");
+    return {
+      id: `line-${String(index + 1).padStart(4, "0")}`,
+      startTimeMs: toProjectKMilliseconds(start),
+      endTimeMs: toProjectKMilliseconds(lineEnd),
+      text: row.text,
+      timingQuality: lineEndIsExact && allSegmentsExact ? "exact" as const : "mixed" as const,
+      displayMode: timingMode === "line" ? "line" as const : "fine" as const,
+      segments: lineSegments,
+    };
+  });
+
+  if (errors.length) return { output: "", errors };
+
+  const hasExactEnd = documentLines.every((line) => line.timingQuality === "exact");
+  const document = {
+    format: "project-k-lyrics" as const,
+    formatVersion: 1 as const,
+    timeUnit: "milliseconds" as const,
+    timingQuality: hasExactEnd ? "exact" as const : "mixed" as const,
+    metadata: {
+      source: {
+        application: "MakeLRC",
+        kind: "manual-authoring",
+        ...(options.audioName ? { audioName: options.audioName } : {}),
+      },
+    },
+    tracks: [{
+      id: "main",
+      name: "Main",
+      partIds: [] as string[],
+      lines: documentLines,
+    }],
+    extensions: {
+      "com.shinyo.makelrc": {
+        authoringMode: timingMode === "line" ? "line" : "fine",
+        endTimePolicy: "next-start-or-default",
+        defaultTailSeconds: DEFAULT_END_TIME_SECONDS,
+      },
+    },
+  };
+  return { output: JSON.stringify(document, null, 2), errors: [] };
+}
+
 function buildOutputPreviewBlocks(
   lines: string[],
   timings: Array<number | undefined>,
+  endTimings: Array<number | undefined>,
   segmentTimings: Array<Array<number | undefined>>,
+  segmentEndTimings: Array<Array<number | undefined>>,
   format: OutputFormat,
-  options: { compactEnhanced?: boolean } = {},
+  options: OutputBuildOptions = {},
 ): OutputPreviewBlock[] {
-  const rows = getRowsWithSegments(lines, timings, segmentTimings);
+  const rows = getRowsWithSegments(lines, timings, endTimings, segmentTimings, segmentEndTimings);
+
+  if (format === "project-k-json") {
+    const result = buildProjectKJsonOutput(lines, timings, endTimings, segmentTimings, segmentEndTimings, options);
+    return [{
+      key: "project-k-json",
+      lines: result.output ? result.output.split("\n") : result.errors.map((error) => `${TEXT.ja.jsonValidationError}: ${error}`),
+    }];
+  }
 
   if (format === "webvtt") {
     return [
@@ -377,7 +588,7 @@ function clampLineIndex(index: number, lineCount: number) {
 }
 
 function buildOutput(lines: string[], timings: Array<number | undefined>, format: OutputFormat) {
-  const blocks = buildOutputPreviewBlocks(lines, timings, [], format);
+  const blocks = buildOutputPreviewBlocks(lines, timings, [], [], [], format);
   const separator = format === "srt" || format === "webvtt" ? "\n\n" : "\n";
   return blocks.map((block) => block.lines.join("\n")).join(separator);
 }
@@ -385,10 +596,13 @@ function buildOutput(lines: string[], timings: Array<number | undefined>, format
 function buildConvertedOutput(
   lines: string[],
   timings: Array<number | undefined>,
+  endTimings: Array<number | undefined>,
   segmentTimings: Array<Array<number | undefined>>,
+  segmentEndTimings: Array<Array<number | undefined>>,
   format: OutputFormat,
+  options: Pick<OutputBuildOptions, "timingMode" | "audioName"> = {},
 ) {
-  const blocks = buildOutputPreviewBlocks(lines, timings, segmentTimings, format);
+  const blocks = buildOutputPreviewBlocks(lines, timings, endTimings, segmentTimings, segmentEndTimings, format, options);
   const separator = format === "srt" || format === "webvtt" ? "\n\n" : "\n";
   return blocks.map((block) => block.lines.join("\n")).join(separator);
 }
@@ -402,7 +616,9 @@ function readDraft(): Draft | null {
     return {
       lyrics: normalizeLyrics(draft.lyrics ?? ""),
       timings: Array.isArray(draft.timings) ? draft.timings : [],
+      endTimings: Array.isArray(draft.endTimings) ? draft.endTimings : [],
       segmentTimings: Array.isArray(draft.segmentTimings) ? draft.segmentTimings : [],
+      segmentEndTimings: Array.isArray(draft.segmentEndTimings) ? draft.segmentEndTimings : [],
       activeIndex: Number.isInteger(draft.activeIndex) ? draft.activeIndex ?? 0 : 0,
       activeSegmentIndex: Number.isInteger(draft.activeSegmentIndex) ? draft.activeSegmentIndex ?? 0 : 0,
       format: draft.format ?? "lrc",
@@ -440,8 +656,12 @@ export function App() {
   const [lyrics, setLyrics] = useState(initialDraft?.lyrics ?? "");
   const [lines, setLines] = useState(() => parseLines(initialDraft?.lyrics ?? ""));
   const [timings, setTimings] = useState<Array<number | undefined>>(initialDraft?.timings ?? []);
+  const [endTimings, setEndTimings] = useState<Array<number | undefined>>(initialDraft?.endTimings ?? []);
   const [segmentTimings, setSegmentTimings] = useState<Array<Array<number | undefined>>>(
     initialDraft?.segmentTimings ?? [],
+  );
+  const [segmentEndTimings, setSegmentEndTimings] = useState<Array<Array<number | undefined>>>(
+    initialDraft?.segmentEndTimings ?? [],
   );
   const [activeIndex, setActiveIndex] = useState(initialDraft?.activeIndex ?? 0);
   const [activeSegmentIndex, setActiveSegmentIndex] = useState(initialActiveSegmentIndex);
@@ -454,6 +674,7 @@ export function App() {
   const [theme, setTheme] = useState<ThemeMode>(readStoredTheme);
   const [currentTime, setCurrentTime] = useState(0);
   const [audioUrl, setAudioUrl] = useState("");
+  const [audioName, setAudioName] = useState("");
   const [isAudioDragging, setIsAudioDragging] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
   const audioRef = useRef<HTMLAudioElement | null>(null);
@@ -463,6 +684,7 @@ export function App() {
   const displayedCentisecondRef = useRef(-1);
   const activeIndexRef = useRef(initialDraft?.activeIndex ?? 0);
   const activeSegmentIndexRef = useRef(initialActiveSegmentIndex);
+  const timingCaptureRef = useRef<TimingCapture | null>(null);
   const lastImmediateStampRef = useRef(0);
   const canUseDetailedTiming = canFormatUseDetailedTiming(format);
   const effectiveTimingMode: TimingMode = canUseDetailedTiming ? timingMode : "line";
@@ -471,8 +693,12 @@ export function App() {
   const themeLabel = theme === "light" ? text.darkTheme : text.lightTheme;
 
   const outputPreviewBlocks = useMemo(
-    () => buildOutputPreviewBlocks(lines, timings, [], format, { compactEnhanced: true }),
-    [format, lines, timings],
+    () => buildOutputPreviewBlocks(lines, timings, endTimings, segmentTimings, segmentEndTimings, format, {
+      compactEnhanced: true,
+      timingMode: effectiveTimingMode,
+      audioName,
+    }),
+    [audioName, effectiveTimingMode, endTimings, format, lines, segmentEndTimings, segmentTimings, timings],
   );
   const activeLine = lines[activeIndex] ?? text.enterLyrics;
   const activeTokens = useMemo(
@@ -511,7 +737,9 @@ export function App() {
         ...stack,
         {
           timings: [...timings],
+          endTimings: [...endTimings],
           segmentTimings: segmentTimings.map((items) => [...items]),
+          segmentEndTimings: segmentEndTimings.map((items) => [...items]),
           activeIndex,
           activeSegmentIndex,
         },
@@ -519,7 +747,7 @@ export function App() {
       return next.length > 100 ? next.slice(1) : next;
     });
     setRedoStack([]);
-  }, [activeIndex, activeSegmentIndex, segmentTimings, timings]);
+  }, [activeIndex, activeSegmentIndex, endTimings, segmentEndTimings, segmentTimings, timings]);
 
   const releaseButtonFocus = useCallback(() => {
     const activeElement = document.activeElement;
@@ -567,83 +795,159 @@ export function App() {
     setLyrics(normalized);
     setLines(nextLines);
     setTimings((current) => current.slice(0, nextLines.length));
+    setEndTimings((current) => current.slice(0, nextLines.length));
     setSegmentTimings((current) => current.slice(0, nextLines.length));
+    setSegmentEndTimings((current) => current.slice(0, nextLines.length));
     setActiveIndex((index) => clampLineIndex(index, nextLines.length));
     setActiveSegmentIndex(0);
   }, []);
 
-  const stampCurrentLine = useCallback(() => {
-    if (!lines.length) return;
-    releaseButtonFocus();
-    const audio = audioRef.current;
-    const stampTime = audio?.currentTime ?? 0;
+  const startTimingCapture = useCallback(() => {
+    if (!lines.length || timingCaptureRef.current) return;
     const currentLineIndex = clampLineIndex(activeIndexRef.current, lines.length);
-    const currentSegmentIndex = activeSegmentIndexRef.current;
+    const currentSegmentIndex = effectiveTimingMode === "line" ? 0 : activeSegmentIndexRef.current;
+    const startTime = audioRef.current?.currentTime ?? 0;
+    const tokens = tokenizeForMode(lines[currentLineIndex] ?? "", effectiveTimingMode);
+
+    pushUndo();
+    timingCaptureRef.current = {
+      lineIndex: currentLineIndex,
+      segmentIndex: currentSegmentIndex,
+      startTime,
+    };
 
     if (effectiveTimingMode !== "line") {
-      pushUndo();
-
-      const tokens = tokenizeForMode(lines[currentLineIndex] ?? "", effectiveTimingMode);
       setSegmentTimings((current) => {
         const next = [...current];
         const lineTimings = [...(next[currentLineIndex] ?? [])];
-        lineTimings[currentSegmentIndex] = stampTime;
+        lineTimings[currentSegmentIndex] = startTime;
         lineTimings.length = tokens.length;
         next[currentLineIndex] = lineTimings;
         return next;
       });
-
+      setSegmentEndTimings((current) => {
+        const next = [...current];
+        const lineEndTimings = [...(next[currentLineIndex] ?? [])];
+        lineEndTimings[currentSegmentIndex] = undefined;
+        lineEndTimings.length = tokens.length;
+        next[currentLineIndex] = lineEndTimings;
+        return next;
+      });
       if (currentSegmentIndex === 0) {
         setTimings((current) => {
           const next = [...current];
-          next[currentLineIndex] = stampTime;
+          next[currentLineIndex] = startTime;
           return next;
         });
-      }
-
-      const tokenCount = tokens.length;
-      if (currentSegmentIndex + 1 < tokenCount) {
-        const nextSegmentIndex = currentSegmentIndex + 1;
-        activeSegmentIndexRef.current = nextSegmentIndex;
-        setActiveSegmentIndex(nextSegmentIndex);
-      } else {
-        const nextLineIndex = clampLineIndex(currentLineIndex + 1, lines.length);
-        activeIndexRef.current = nextLineIndex;
-        activeSegmentIndexRef.current = 0;
-        setActiveIndex(nextLineIndex);
-        setActiveSegmentIndex(0);
+        setEndTimings((current) => {
+          const next = [...current];
+          next[currentLineIndex] = undefined;
+          return next;
+        });
       }
       return;
     }
 
-    pushUndo();
     setTimings((current) => {
       const next = [...current];
-      next[currentLineIndex] = stampTime;
+      next[currentLineIndex] = startTime;
       return next;
     });
-    const nextLineIndex = clampLineIndex(currentLineIndex + 1, lines.length);
+    setEndTimings((current) => {
+      const next = [...current];
+      next[currentLineIndex] = undefined;
+      return next;
+    });
+  }, [effectiveTimingMode, lines, pushUndo]);
+
+  const finishTimingCapture = useCallback(() => {
+    const capture = timingCaptureRef.current;
+    if (!capture) return;
+    timingCaptureRef.current = null;
+    const endTime = audioRef.current?.currentTime ?? 0;
+    const hasUsableEnd = Number.isFinite(endTime) && endTime > capture.startTime;
+
+    if (hasUsableEnd) {
+      if (effectiveTimingMode === "line") {
+        setEndTimings((current) => {
+          const next = [...current];
+          next[capture.lineIndex] = endTime;
+          return next;
+        });
+      } else {
+        const tokens = tokenizeForMode(lines[capture.lineIndex] ?? "", effectiveTimingMode);
+        setSegmentEndTimings((current) => {
+          const next = [...current];
+          const lineEndTimings = [...(next[capture.lineIndex] ?? [])];
+          lineEndTimings[capture.segmentIndex] = endTime;
+          lineEndTimings.length = tokens.length;
+          next[capture.lineIndex] = lineEndTimings;
+          return next;
+        });
+        if (capture.segmentIndex === tokens.length - 1) {
+          setEndTimings((current) => {
+            const next = [...current];
+            next[capture.lineIndex] = endTime;
+            return next;
+          });
+        }
+      }
+    }
+
+    const tokens = tokenizeForMode(lines[capture.lineIndex] ?? "", effectiveTimingMode);
+    if (effectiveTimingMode !== "line" && capture.segmentIndex + 1 < tokens.length) {
+      const nextSegmentIndex = capture.segmentIndex + 1;
+      activeSegmentIndexRef.current = nextSegmentIndex;
+      setActiveSegmentIndex(nextSegmentIndex);
+      return;
+    }
+
+    const nextLineIndex = clampLineIndex(capture.lineIndex + 1, lines.length);
     activeIndexRef.current = nextLineIndex;
     activeSegmentIndexRef.current = 0;
     setActiveIndex(nextLineIndex);
     setActiveSegmentIndex(0);
-  }, [effectiveTimingMode, lines, pushUndo, releaseButtonFocus]);
+  }, [effectiveTimingMode, lines]);
 
-  const stampFromImmediateInput = useCallback((event: ReactPointerEvent<HTMLButtonElement> | ReactTouchEvent<HTMLButtonElement>) => {
-    event.preventDefault();
-    lastImmediateStampRef.current = performance.now();
-    stampCurrentLine();
-  }, [stampCurrentLine]);
+  const stampCurrentLine = useCallback(() => {
+    startTimingCapture();
+    finishTimingCapture();
+  }, [finishTimingCapture, startTimingCapture]);
 
   const handleStampPointerDown = useCallback((event: ReactPointerEvent<HTMLButtonElement>) => {
-    if (event.pointerType === "mouse") return;
-    stampFromImmediateInput(event);
-  }, [stampFromImmediateInput]);
+    event.preventDefault();
+    lastImmediateStampRef.current = performance.now();
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+    startTimingCapture();
+  }, [startTimingCapture]);
+
+  const handleStampPointerUp = useCallback((event: ReactPointerEvent<HTMLButtonElement>) => {
+    event.preventDefault();
+    lastImmediateStampRef.current = performance.now();
+    if (event.currentTarget.hasPointerCapture?.(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    finishTimingCapture();
+  }, [finishTimingCapture]);
+
+  const handleStampPointerCancel = useCallback((event: ReactPointerEvent<HTMLButtonElement>) => {
+    event.preventDefault();
+    timingCaptureRef.current = null;
+  }, []);
 
   const handleStampTouchStart = useCallback((event: ReactTouchEvent<HTMLButtonElement>) => {
     if ("PointerEvent" in window) return;
-    stampFromImmediateInput(event);
-  }, [stampFromImmediateInput]);
+    event.preventDefault();
+    lastImmediateStampRef.current = performance.now();
+    startTimingCapture();
+  }, [startTimingCapture]);
+
+  const handleStampTouchEnd = useCallback((event: ReactTouchEvent<HTMLButtonElement>) => {
+    if ("PointerEvent" in window) return;
+    event.preventDefault();
+    lastImmediateStampRef.current = performance.now();
+    finishTimingCapture();
+  }, [finishTimingCapture]);
 
   const handleStampClick = useCallback(() => {
     if (performance.now() - lastImmediateStampRef.current < 700) return;
@@ -679,13 +983,17 @@ export function App() {
         ...redo,
         {
           timings: [...timings],
+          endTimings: [...endTimings],
           segmentTimings: segmentTimings.map((items) => [...items]),
+          segmentEndTimings: segmentEndTimings.map((items) => [...items]),
           activeIndex,
           activeSegmentIndex,
         },
       ]);
       setTimings([...snapshot.timings]);
+      setEndTimings([...snapshot.endTimings]);
       setSegmentTimings(snapshot.segmentTimings.map((items) => [...items]));
+      setSegmentEndTimings(snapshot.segmentEndTimings.map((items) => [...items]));
       const nextLineIndex = clampLineIndex(snapshot.activeIndex, lines.length);
       activeIndexRef.current = nextLineIndex;
       activeSegmentIndexRef.current = snapshot.activeSegmentIndex;
@@ -701,9 +1009,11 @@ export function App() {
   }, [
     activeIndex,
     activeSegmentIndex,
+    endTimings,
     effectiveTimingMode,
     lines.length,
     releaseButtonFocus,
+    segmentEndTimings,
     segmentTimings,
     startTimeLoop,
     syncCurrentTime,
@@ -719,13 +1029,17 @@ export function App() {
         ...undoItems,
         {
           timings: [...timings],
+          endTimings: [...endTimings],
           segmentTimings: segmentTimings.map((items) => [...items]),
+          segmentEndTimings: segmentEndTimings.map((items) => [...items]),
           activeIndex,
           activeSegmentIndex,
         },
       ]);
       setTimings([...snapshot.timings]);
+      setEndTimings([...snapshot.endTimings]);
       setSegmentTimings(snapshot.segmentTimings.map((items) => [...items]));
+      setSegmentEndTimings(snapshot.segmentEndTimings.map((items) => [...items]));
       const nextLineIndex = clampLineIndex(snapshot.activeIndex, lines.length);
       activeIndexRef.current = nextLineIndex;
       activeSegmentIndexRef.current = snapshot.activeSegmentIndex;
@@ -733,12 +1047,15 @@ export function App() {
       setActiveSegmentIndex(snapshot.activeSegmentIndex);
       return stack.slice(0, -1);
     });
-  }, [activeIndex, activeSegmentIndex, lines.length, releaseButtonFocus, segmentTimings, timings]);
+  }, [activeIndex, activeSegmentIndex, endTimings, lines.length, releaseButtonFocus, segmentEndTimings, segmentTimings, timings]);
 
   const clearTimings = useCallback(() => {
     releaseButtonFocus();
+    timingCaptureRef.current = null;
     setTimings([]);
+    setEndTimings([]);
     setSegmentTimings([]);
+    setSegmentEndTimings([]);
     setUndoStack([]);
     setRedoStack([]);
     activeIndexRef.current = 0;
@@ -759,7 +1076,17 @@ export function App() {
       undefined,
       ...current.slice(insertAt),
     ]);
+    setEndTimings((current) => [
+      ...current.slice(0, insertAt),
+      undefined,
+      ...current.slice(insertAt),
+    ]);
     setSegmentTimings((current) => [
+      ...current.slice(0, insertAt),
+      [],
+      ...current.slice(insertAt),
+    ]);
+    setSegmentEndTimings((current) => [
       ...current.slice(0, insertAt),
       [],
       ...current.slice(insertAt),
@@ -789,7 +1116,10 @@ export function App() {
   }, [updateLyrics]);
 
   const copyOutput = useCallback(async () => {
-    const output = buildConvertedOutput(lines, timings, segmentTimings, format);
+    const output = buildConvertedOutput(lines, timings, endTimings, segmentTimings, segmentEndTimings, format, {
+      timingMode: effectiveTimingMode,
+      audioName,
+    });
     if (!output) return;
     try {
       await navigator.clipboard.writeText(output);
@@ -804,20 +1134,24 @@ export function App() {
       textarea.remove();
       setSaveStatus("コピーしました");
     }
-  }, [format, lines, segmentTimings, timings]);
+  }, [audioName, effectiveTimingMode, endTimings, format, lines, segmentEndTimings, segmentTimings, timings]);
 
   const downloadOutput = useCallback(() => {
-    const output = buildConvertedOutput(lines, timings, segmentTimings, format);
+    const output = buildConvertedOutput(lines, timings, endTimings, segmentTimings, segmentEndTimings, format, {
+      timingMode: effectiveTimingMode,
+      audioName,
+    });
     if (!output) return;
-    const extension = format === "webvtt" ? "vtt" : format === "srt" ? "srt" : "lrc";
-    const blob = new Blob([output], { type: "text/plain;charset=utf-8" });
+    const extension = format === "project-k-json" ? "lyrics.json" : format === "webvtt" ? "vtt" : format === "srt" ? "srt" : "lrc";
+    const mimeType = format === "project-k-json" ? "application/json;charset=utf-8" : "text/plain;charset=utf-8";
+    const blob = new Blob([output], { type: mimeType });
     const url = URL.createObjectURL(blob);
     const anchor = document.createElement("a");
     anchor.href = url;
     anchor.download = `lyrics.${extension}`;
     anchor.click();
     URL.revokeObjectURL(url);
-  }, [format, lines, segmentTimings, timings]);
+  }, [audioName, effectiveTimingMode, endTimings, format, lines, segmentEndTimings, segmentTimings, timings]);
 
   const loadAudioFile = useCallback((file: File) => {
     if (!isLikelyAudioFile(file)) {
@@ -828,6 +1162,7 @@ export function App() {
     if (audioUrl) URL.revokeObjectURL(audioUrl);
     const nextUrl = URL.createObjectURL(file);
     setAudioUrl(nextUrl);
+    setAudioName(file.name);
     setCurrentTime(0);
     displayedCentisecondRef.current = -1;
     setSaveStatus(file.name);
@@ -839,7 +1174,9 @@ export function App() {
         const draft: Draft = {
           lyrics,
           timings,
+          endTimings,
           segmentTimings,
+          segmentEndTimings,
           activeIndex,
           activeSegmentIndex,
           format,
@@ -852,7 +1189,7 @@ export function App() {
       }
     }, 1500);
     return () => window.clearTimeout(timeout);
-  }, [activeIndex, activeSegmentIndex, format, lyrics, segmentTimings, timingMode, timings]);
+  }, [activeIndex, activeSegmentIndex, endTimings, format, lyrics, segmentEndTimings, segmentTimings, timingMode, timings]);
 
   useEffect(() => {
     const container = outputPreviewRef.current;
@@ -919,7 +1256,7 @@ export function App() {
       if (event.code === "Space") {
         event.preventDefault();
         event.stopPropagation();
-        stampCurrentLine();
+        if (!event.repeat) startTimingCapture();
         return;
       }
 
@@ -965,6 +1302,7 @@ export function App() {
       if (event.code === "Space") {
         event.preventDefault();
         event.stopPropagation();
+        finishTimingCapture();
       }
     };
 
@@ -974,7 +1312,7 @@ export function App() {
       document.removeEventListener("keydown", onKeyDown, { capture: true });
       document.removeEventListener("keyup", onKeyUp, { capture: true });
     };
-  }, [moveActive, redo, seekBy, stampCurrentLine, togglePlayback, undo]);
+  }, [finishTimingCapture, moveActive, redo, seekBy, startTimingCapture, togglePlayback, undo]);
 
   useEffect(() => {
     let lastTouchEnd = 0;
@@ -1125,7 +1463,10 @@ export function App() {
               type="button"
               onMouseDown={preventButtonMouseFocus}
               onPointerDown={handleStampPointerDown}
+              onPointerUp={handleStampPointerUp}
+              onPointerCancel={handleStampPointerCancel}
               onTouchStart={handleStampTouchStart}
+              onTouchEnd={handleStampTouchEnd}
               onClick={handleStampClick}
             >
               <span>{text.tapToStamp}</span>
@@ -1169,6 +1510,7 @@ export function App() {
                     }
                   }}
                 >
+                  <option value="project-k-json">Project K JSON</option>
                   <option value="lrc">LRC</option>
                   <option value="enhanced-lrc">Enhanced LRC</option>
                   <option value="webvtt">WebVTT</option>
@@ -1201,12 +1543,15 @@ export function App() {
                 ref={block.sourceIndex === activeIndex ? activeOutputRef : undefined}
                 className={`output-line${block.sourceIndex === activeIndex ? " is-active" : ""}`}
               >
-                {block.lines.map((line) => (
-                  <span key={line}>{line}</span>
+                {block.lines.map((line, lineIndex) => (
+                  <span key={`${block.key}-${lineIndex}`}>{line}</span>
                 ))}
               </div>
             ))}
           </div>
+          {format !== "project-k-json" && (
+            <p className="output-notice">{text.outputFormatLossNotice}</p>
+          )}
         </section>
       </section>
       <footer className="site-footer">

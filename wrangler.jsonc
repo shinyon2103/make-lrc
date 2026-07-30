@@ -1,9 +1,18 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "make-lrc",
+  "main": "worker/index.ts",
   "compatibility_date": "2026-07-05",
+  "routes": [
+    {
+      "pattern": "make-lrc.shinyo-n.com",
+      "custom_domain": true
+    }
+  ],
   "assets": {
     "directory": "./make-lrc",
+    "binding": "ASSETS",
+    "run_worker_first": true,
     "not_found_handling": "single-page-application"
   }
 }
