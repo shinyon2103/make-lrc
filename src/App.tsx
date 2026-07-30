@@ -652,6 +652,9 @@ function buildProjectKJsonOutput(
   if (errors.length) return { output: "", errors };
 
   const hasExactEnd = documentLines.every((line) => line.timingQuality === "exact");
+  const endTimePolicy = timingMode === "segment" && detailedEndPolicy === "same-line-only"
+    ? "same-line-only"
+    : "next-start-or-default";
   const document = {
     format: "project-k-lyrics" as const,
     formatVersion: 1 as const,
@@ -673,7 +676,7 @@ function buildProjectKJsonOutput(
     extensions: {
       "com.shinyo.makelrc": {
         authoringMode: timingMode === "line" ? "line" : "fine",
-        endTimePolicy: "next-start-or-default",
+        endTimePolicy,
         defaultTailSeconds: DEFAULT_END_TIME_SECONDS,
       },
     },
