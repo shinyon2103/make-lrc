@@ -602,8 +602,7 @@ function buildProjectKJsonOutput(
         if (detailedEndPolicy === "same-line-only") {
           if (nextSegmentStartIsValid) {
             segmentEnd = nextSegmentStart ?? safeLineEnd;
-            segmentEndIsExact = explicitSegmentEndIsValid
-              && Math.abs((explicitSegmentEnd ?? 0) - segmentEnd) < MIN_TIMING_INTERVAL_SECONDS;
+            segmentEndIsExact = true;
           } else if (explicitSegmentEndIsValid) {
             segmentEnd = explicitSegmentEnd ?? safeLineEnd;
             segmentEndIsExact = true;

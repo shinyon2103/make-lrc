@@ -39,7 +39,7 @@ MakeLRCが単体で作成する初期JSONは、1つの編集トラックを持�
   "format": "project-k-lyrics",
   "formatVersion": 1,
   "timeUnit": "milliseconds",
-  "timingQuality": "mixed",
+  "timingQuality": "exact",
   "metadata": {
     "title": "曲名",
     "artist": "アーティスト名",
@@ -61,7 +61,7 @@ MakeLRCが単体で作成する初期JSONは、1つの編集トラックを持�
           "startTimeMs": 1200,
           "endTimeMs": 3100,
           "text": "君の声",
-          "timingQuality": "inferred",
+          "timingQuality": "exact",
           "displayMode": "fine",
           "segments": [
             {
@@ -71,7 +71,7 @@ MakeLRCが単体で作成する初期JSONは、1つの編集トラックを持�
               "text": "君",
               "granularity": "fine",
               "fineUnit": "character",
-              "timingQuality": "inferred"
+              "timingQuality": "exact"
             },
             {
               "id": "line-0001-segment-0002",
@@ -80,7 +80,7 @@ MakeLRCが単体で作成する初期JSONは、1つの編集トラックを持�
               "text": "の声",
               "granularity": "fine",
               "fineUnit": "character",
-              "timingQuality": "inferred"
+              "timingQuality": "exact"
             }
           ]
         }
@@ -134,14 +134,14 @@ JSONからSynthesizer Vのノートを作ることはしない。JSONはMakeLRC�
 現在のMakeLRCは主に開始時刻を打刻するため、終了時刻を別途明示しない作成結果が発生する。JSON v1は終了時刻を必須とするため、保存時のポリシーを固定する。
 
 - 打刻した開始時刻は、音声の `currentTime` から取得する。
-- セグメントの終了時刻は、同じ行の次のセグメント開始時刻を第一候補にする。
+- 詳細モードの同じ行内では、セグメントの終了時刻を次のセグメント開始時刻と同じにする。この連続境界は補間で入力されても `exact` とする。
 - 最後のセグメントは行の終了時刻、行の終了時刻は次の行の開始時刻を第一候補にする。
 - 最終行・最終セグメントなど次の開始時刻がない場合は、既定の末尾長を使う。
-- このように自動生成した終了時刻は `inferred` とする。
-- 将来、終了位置をユーザーが直接調整できるUIを追加した場合だけ、その区間を `exact` とできる。
+- 行モードで次の行の開始時刻や既定の末尾長から終了時刻を作る場合、また入力形式上終了時刻が不明な場合は `inferred` とする。
+- ユーザーが明示的に記録した終了時刻と、同じ行の次セグメント開始時刻から決まる連続境界は `exact` とする。
 - 行またはセグメントの `timingQuality` は `exact` または `inferred` とする。
 - 開始時刻が確定でも終了時刻が推定の場合、その行は `inferred` とする。行やセグメントの品質が混在する文書全体だけを `mixed` とする。
-- 推定値を `exact` として出力しない。
+- 行をまたぐ補完や終了時刻不明の推定値を `exact` として出力しない。
 
 詳細モードでは、終了時刻ポリシーを次の2種類から選択できる。
 
