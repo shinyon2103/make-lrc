@@ -61,7 +61,7 @@ MakeLRCが単体で作成する初期JSONは、1つの編集トラックを持�
           "startTimeMs": 1200,
           "endTimeMs": 3100,
           "text": "君の声",
-          "timingQuality": "mixed",
+          "timingQuality": "inferred",
           "displayMode": "fine",
           "segments": [
             {
@@ -139,7 +139,8 @@ JSONからSynthesizer Vのノートを作ることはしない。JSONはMakeLRC�
 - 最終行・最終セグメントなど次の開始時刻がない場合は、既定の末尾長を使う。
 - このように自動生成した終了時刻は `inferred` とする。
 - 将来、終了位置をユーザーが直接調整できるUIを追加した場合だけ、その区間を `exact` とできる。
-- 開始時刻が確定でも終了時刻が推定の場合、行または文書全体は `mixed` とする。
+- 行またはセグメントの `timingQuality` は `exact` または `inferred` とする。
+- 開始時刻が確定でも終了時刻が推定の場合、その行は `inferred` とする。行やセグメントの品質が混在する文書全体だけを `mixed` とする。
 - 推定値を `exact` として出力しない。
 
 詳細モードでは、終了時刻ポリシーを次の2種類から選択できる。

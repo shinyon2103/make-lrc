@@ -651,7 +651,7 @@ function buildProjectKJsonOutput(
       startTimeMs: toProjectKMilliseconds(start),
       endTimeMs: toProjectKMilliseconds(safeLineEnd),
       text: row.text,
-      timingQuality: lineEndIsExact && allSegmentsExact ? "exact" as const : "mixed" as const,
+      timingQuality: lineEndIsExact && allSegmentsExact ? "exact" as const : "inferred" as const,
       displayMode: timingMode === "line" ? "line" as const : "fine" as const,
       segments: lineSegments,
     };
