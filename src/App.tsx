@@ -4,6 +4,7 @@ import type {
   PointerEvent as ReactPointerEvent,
   TouchEvent as ReactTouchEvent,
 } from "react";
+import { completeStableTimingCapture, readStableMediaTime } from "./timingCapture";
 
 const STORAGE_KEY = "makelrc.autosave.v3";
 const LANGUAGE_STORAGE_KEY = "makelrc.language";
@@ -169,6 +170,9 @@ function translateStatus(status: string, language: Language) {
     "再生できません": "Could not play",
     "コピーしました": "Copied",
     "音源ファイルを選択してください": "Choose an audio file",
+    "音源の準備完了後に打刻してください": "Wait until the audio is ready before stamping",
+    "シーク完了後に打刻してください": "Wait until seeking finishes before stamping",
+    "再生位置が変わったため打刻を取り消しました": "Stamp canceled because the playback position changed",
     "一時保存済み": "Draft saved",
     "一時保存できません": "Could not save draft",
   };
@@ -217,6 +221,8 @@ type TimingCapture = {
   lineIndex: number;
   segmentIndex: number;
   startTime: number;
+  timingMode: TimingMode;
+  timelineRevision: number;
 };
 
 function normalizeLyrics(text: string) {
@@ -859,6 +865,7 @@ export function App() {
   const activeIndexRef = useRef(initialDraft?.activeIndex ?? 0);
   const activeSegmentIndexRef = useRef(initialActiveSegmentIndex);
   const timingCaptureRef = useRef<TimingCapture | null>(null);
+  const timelineRevisionRef = useRef(0);
   const lastImmediateStampRef = useRef(0);
   const canUseDetailedTiming = canFormatUseDetailedTiming(format);
   const effectiveTimingMode: TimingMode = canUseDetailedTiming ? timingMode : "line";
@@ -1000,100 +1007,110 @@ export function App() {
     setActiveSegmentIndex(0);
   }, []);
 
+  const invalidateTimingCapture = useCallback((notify = true) => {
+    timelineRevisionRef.current += 1;
+    if (!timingCaptureRef.current) return;
+    timingCaptureRef.current = null;
+    if (notify) setSaveStatus("再生位置が変わったため打刻を取り消しました");
+  }, []);
+
+  useEffect(() => {
+    invalidateTimingCapture();
+  }, [effectiveTimingMode, invalidateTimingCapture, lines]);
+
   const startTimingCapture = useCallback(() => {
     if (!lines.length || timingCaptureRef.current) return;
+    const audio = audioRef.current;
+    if (!audio || audio.readyState < 1) {
+      setSaveStatus("音源の準備完了後に打刻してください");
+      return;
+    }
+    if (audio.seeking) {
+      setSaveStatus("シーク完了後に打刻してください");
+      return;
+    }
+    const startTime = readStableMediaTime(audio);
+    if (!Number.isFinite(startTime)) return;
+
     const currentLineIndex = clampLineIndex(activeIndexRef.current, lines.length);
     const currentSegmentIndex = effectiveTimingMode === "line" ? 0 : activeSegmentIndexRef.current;
-    const startTime = audioRef.current?.currentTime ?? 0;
-    const tokens = tokenizeForMode(lines[currentLineIndex] ?? "", effectiveTimingMode);
-
-    pushUndo();
     timingCaptureRef.current = {
       lineIndex: currentLineIndex,
       segmentIndex: currentSegmentIndex,
-      startTime,
+      startTime: startTime ?? 0,
+      timingMode: effectiveTimingMode,
+      timelineRevision: timelineRevisionRef.current,
     };
-
-    if (effectiveTimingMode !== "line") {
-      setSegmentTimings((current) => {
-        const next = [...current];
-        const lineTimings = [...(next[currentLineIndex] ?? [])];
-        lineTimings[currentSegmentIndex] = startTime;
-        lineTimings.length = tokens.length;
-        next[currentLineIndex] = lineTimings;
-        return next;
-      });
-      setSegmentEndTimings((current) => {
-        const next = [...current];
-        const lineEndTimings = [...(next[currentLineIndex] ?? [])];
-        lineEndTimings[currentSegmentIndex] = undefined;
-        lineEndTimings.length = tokens.length;
-        next[currentLineIndex] = lineEndTimings;
-        return next;
-      });
-      if (currentSegmentIndex === 0) {
-        setTimings((current) => {
-          const next = [...current];
-          next[currentLineIndex] = startTime;
-          return next;
-        });
-        setEndTimings((current) => {
-          const next = [...current];
-          next[currentLineIndex] = undefined;
-          return next;
-        });
-      }
-      return;
-    }
-
-    setTimings((current) => {
-      const next = [...current];
-      next[currentLineIndex] = startTime;
-      return next;
-    });
-    setEndTimings((current) => {
-      const next = [...current];
-      next[currentLineIndex] = undefined;
-      return next;
-    });
-  }, [effectiveTimingMode, lines, pushUndo]);
+  }, [effectiveTimingMode, lines]);
 
   const finishTimingCapture = useCallback(() => {
     const capture = timingCaptureRef.current;
     if (!capture) return;
     timingCaptureRef.current = null;
-    const endTime = audioRef.current?.currentTime ?? 0;
-    const hasUsableEnd = Number.isFinite(endTime) && endTime > capture.startTime;
 
-    if (hasUsableEnd) {
-      if (effectiveTimingMode === "line") {
+    const completedCapture = completeStableTimingCapture(
+      capture.startTime,
+      capture.timelineRevision,
+      timelineRevisionRef.current,
+      audioRef.current,
+    );
+    if (!completedCapture) {
+      setSaveStatus("再生位置が変わったため打刻を取り消しました");
+      return;
+    }
+
+    const safeEndTime = completedCapture.endTime ?? completedCapture.startTime;
+    const hasUsableEnd = Number.isFinite(completedCapture.endTime);
+    const tokens = tokenizeForMode(lines[capture.lineIndex] ?? "", capture.timingMode);
+    pushUndo();
+
+    if (capture.timingMode === "line") {
+      setTimings((current) => {
+        const next = [...current];
+        next[capture.lineIndex] = capture.startTime;
+        return next;
+      });
+      setEndTimings((current) => {
+        const next = [...current];
+        next[capture.lineIndex] = hasUsableEnd ? safeEndTime : undefined;
+        return next;
+      });
+    } else {
+      setSegmentTimings((current) => {
+        const next = [...current];
+        const lineTimings = [...(next[capture.lineIndex] ?? [])];
+        lineTimings[capture.segmentIndex] = capture.startTime;
+        lineTimings.length = tokens.length;
+        next[capture.lineIndex] = lineTimings;
+        return next;
+      });
+      setSegmentEndTimings((current) => {
+        const next = [...current];
+        const lineEndTimings = [...(next[capture.lineIndex] ?? [])];
+        lineEndTimings[capture.segmentIndex] = hasUsableEnd ? safeEndTime : undefined;
+        lineEndTimings.length = tokens.length;
+        next[capture.lineIndex] = lineEndTimings;
+        return next;
+      });
+      if (capture.segmentIndex === 0) {
+        setTimings((current) => {
+          const next = [...current];
+          next[capture.lineIndex] = capture.startTime;
+          return next;
+        });
+      }
+      if (capture.segmentIndex === 0 || capture.segmentIndex === tokens.length - 1) {
         setEndTimings((current) => {
           const next = [...current];
-          next[capture.lineIndex] = endTime;
+          next[capture.lineIndex] = capture.segmentIndex === tokens.length - 1 && hasUsableEnd
+            ? safeEndTime
+            : undefined;
           return next;
         });
-      } else {
-        const tokens = tokenizeForMode(lines[capture.lineIndex] ?? "", effectiveTimingMode);
-        setSegmentEndTimings((current) => {
-          const next = [...current];
-          const lineEndTimings = [...(next[capture.lineIndex] ?? [])];
-          lineEndTimings[capture.segmentIndex] = endTime;
-          lineEndTimings.length = tokens.length;
-          next[capture.lineIndex] = lineEndTimings;
-          return next;
-        });
-        if (capture.segmentIndex === tokens.length - 1) {
-          setEndTimings((current) => {
-            const next = [...current];
-            next[capture.lineIndex] = endTime;
-            return next;
-          });
-        }
       }
     }
 
-    const tokens = tokenizeForMode(lines[capture.lineIndex] ?? "", effectiveTimingMode);
-    if (effectiveTimingMode !== "line" && capture.segmentIndex + 1 < tokens.length) {
+    if (capture.timingMode !== "line" && capture.segmentIndex + 1 < tokens.length) {
       const nextSegmentIndex = capture.segmentIndex + 1;
       activeSegmentIndexRef.current = nextSegmentIndex;
       setActiveSegmentIndex(nextSegmentIndex);
@@ -1105,7 +1122,7 @@ export function App() {
     activeSegmentIndexRef.current = 0;
     setActiveIndex(nextLineIndex);
     setActiveSegmentIndex(0);
-  }, [effectiveTimingMode, lines]);
+  }, [lines, pushUndo]);
 
   const stampCurrentLine = useCallback(() => {
     startTimingCapture();
@@ -1130,8 +1147,8 @@ export function App() {
 
   const handleStampPointerCancel = useCallback((event: ReactPointerEvent<HTMLButtonElement>) => {
     event.preventDefault();
-    timingCaptureRef.current = null;
-  }, []);
+    invalidateTimingCapture();
+  }, [invalidateTimingCapture]);
 
   const handleStampTouchStart = useCallback((event: ReactTouchEvent<HTMLButtonElement>) => {
     if ("PointerEvent" in window) return;
@@ -1154,23 +1171,37 @@ export function App() {
 
   const moveActive = useCallback((delta: number) => {
     releaseButtonFocus();
+    invalidateTimingCapture();
     const nextLineIndex = clampLineIndex(activeIndexRef.current + delta, lines.length);
     activeIndexRef.current = nextLineIndex;
     activeSegmentIndexRef.current = 0;
     setActiveIndex(nextLineIndex);
     setActiveSegmentIndex(0);
-  }, [lines.length, releaseButtonFocus]);
+  }, [invalidateTimingCapture, lines.length, releaseButtonFocus]);
 
   const seekBy = useCallback((delta: number) => {
     const audio = audioRef.current;
     if (!audio) return;
     releaseButtonFocus();
+    invalidateTimingCapture();
     audio.currentTime = Math.max(0, audio.currentTime + delta);
     syncCurrentTime(true);
-  }, [releaseButtonFocus, syncCurrentTime]);
+  }, [invalidateTimingCapture, releaseButtonFocus, syncCurrentTime]);
+
+  const resumePlaybackAfterSeek = useCallback((audio: HTMLAudioElement) => {
+    const resume = () => {
+      void audio.play().catch(() => setSaveStatus("再生できません"));
+    };
+    if (audio.seeking) {
+      audio.addEventListener("seeked", resume, { once: true });
+      return;
+    }
+    resume();
+  }, []);
 
   const undo = useCallback(() => {
     releaseButtonFocus();
+    invalidateTimingCapture();
     setUndoStack((stack) => {
       const snapshot = stack.at(-1);
       if (!snapshot) return stack;
@@ -1200,7 +1231,7 @@ export function App() {
       if (Number.isFinite(undoTargetTime) && audioRef.current) {
         audioRef.current.currentTime = Math.max(0, (undoTargetTime ?? 0) - RETAKE_MARGIN_SECONDS);
         syncCurrentTime(true);
-        void audioRef.current.play().then(startTimeLoop).catch(() => undefined);
+        resumePlaybackAfterSeek(audioRef.current);
       }
       return stack.slice(0, -1);
     });
@@ -1209,17 +1240,19 @@ export function App() {
     activeSegmentIndex,
     endTimings,
     effectiveTimingMode,
+    invalidateTimingCapture,
     lines.length,
     releaseButtonFocus,
+    resumePlaybackAfterSeek,
     segmentEndTimings,
     segmentTimings,
-    startTimeLoop,
     syncCurrentTime,
     timings,
   ]);
 
   const redo = useCallback(() => {
     releaseButtonFocus();
+    invalidateTimingCapture();
     setRedoStack((stack) => {
       const snapshot = stack.at(-1);
       if (!snapshot) return stack;
@@ -1245,11 +1278,11 @@ export function App() {
       setActiveSegmentIndex(snapshot.activeSegmentIndex);
       return stack.slice(0, -1);
     });
-  }, [activeIndex, activeSegmentIndex, endTimings, lines.length, releaseButtonFocus, segmentEndTimings, segmentTimings, timings]);
+  }, [activeIndex, activeSegmentIndex, endTimings, invalidateTimingCapture, lines.length, releaseButtonFocus, segmentEndTimings, segmentTimings, timings]);
 
   const clearTimings = useCallback(() => {
     releaseButtonFocus();
-    timingCaptureRef.current = null;
+    invalidateTimingCapture();
     setTimings([]);
     setEndTimings([]);
     setSegmentTimings([]);
@@ -1260,10 +1293,11 @@ export function App() {
     activeSegmentIndexRef.current = 0;
     setActiveIndex(0);
     setActiveSegmentIndex(0);
-  }, [releaseButtonFocus]);
+  }, [invalidateTimingCapture, releaseButtonFocus]);
 
   const insertGapAfterCurrentLine = useCallback(() => {
     releaseButtonFocus();
+    invalidateTimingCapture();
     pushUndo();
     const insertAt = lines.length ? activeIndex + 1 : 0;
     const nextLines = [...lines.slice(0, insertAt), GAP_LINE_TEXT, ...lines.slice(insertAt)];
@@ -1293,19 +1327,20 @@ export function App() {
     activeSegmentIndexRef.current = 0;
     setActiveIndex(insertAt);
     setActiveSegmentIndex(0);
-  }, [activeIndex, lines, pushUndo, releaseButtonFocus]);
+  }, [activeIndex, invalidateTimingCapture, lines, pushUndo, releaseButtonFocus]);
 
   const togglePlayback = useCallback(() => {
     const audio = audioRef.current;
     if (!audio) return;
     releaseButtonFocus();
+    invalidateTimingCapture();
     if (audio.paused) {
       void audio.play().then(startTimeLoop).catch(() => setSaveStatus("再生できません"));
     } else {
       audio.pause();
       syncCurrentTime(true);
     }
-  }, [releaseButtonFocus, startTimeLoop, syncCurrentTime]);
+  }, [invalidateTimingCapture, releaseButtonFocus, startTimeLoop, syncCurrentTime]);
 
   const pasteLyrics = useCallback(async () => {
     if (!navigator.clipboard?.readText) return;
@@ -1359,6 +1394,7 @@ export function App() {
       return;
     }
 
+    invalidateTimingCapture();
     if (audioUrl) URL.revokeObjectURL(audioUrl);
     const nextUrl = URL.createObjectURL(file);
     setAudioUrl(nextUrl);
@@ -1366,7 +1402,7 @@ export function App() {
     setCurrentTime(0);
     displayedCentisecondRef.current = -1;
     setSaveStatus(file.name);
-  }, [audioUrl]);
+  }, [audioUrl, invalidateTimingCapture]);
 
   useEffect(() => {
     const timeout = window.setTimeout(() => {
@@ -1414,30 +1450,57 @@ export function App() {
     const audio = audioRef.current;
     if (!audio) return undefined;
 
-    const onPlay = () => startTimeLoop();
+    const onPlay = () => {
+      invalidateTimingCapture();
+      startTimeLoop();
+    };
     const onPause = () => {
+      invalidateTimingCapture();
       stopTimeLoop();
       syncCurrentTime(true);
     };
+    const onSeeking = () => invalidateTimingCapture();
     const onSeeked = () => syncCurrentTime(true);
     const onLoadedMetadata = () => {
+      invalidateTimingCapture();
       applyAudioTempo();
       syncCurrentTime(true);
     };
+    const onRateChange = () => invalidateTimingCapture();
+    const onEmptied = () => invalidateTimingCapture();
 
     audio.addEventListener("play", onPlay);
     audio.addEventListener("pause", onPause);
+    audio.addEventListener("seeking", onSeeking);
     audio.addEventListener("seeked", onSeeked);
     audio.addEventListener("loadedmetadata", onLoadedMetadata);
+    audio.addEventListener("ratechange", onRateChange);
+    audio.addEventListener("emptied", onEmptied);
 
     return () => {
       audio.removeEventListener("play", onPlay);
       audio.removeEventListener("pause", onPause);
+      audio.removeEventListener("seeking", onSeeking);
       audio.removeEventListener("seeked", onSeeked);
       audio.removeEventListener("loadedmetadata", onLoadedMetadata);
+      audio.removeEventListener("ratechange", onRateChange);
+      audio.removeEventListener("emptied", onEmptied);
       stopTimeLoop();
     };
-  }, [applyAudioTempo, startTimeLoop, stopTimeLoop, syncCurrentTime]);
+  }, [applyAudioTempo, invalidateTimingCapture, startTimeLoop, stopTimeLoop, syncCurrentTime]);
+
+  useEffect(() => {
+    const onBlur = () => invalidateTimingCapture();
+    const onVisibilityChange = () => {
+      if (document.visibilityState !== "visible") invalidateTimingCapture();
+    };
+    window.addEventListener("blur", onBlur);
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => {
+      window.removeEventListener("blur", onBlur);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
+  }, [invalidateTimingCapture]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
