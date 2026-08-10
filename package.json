@@ -5,6 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite --host 0.0.0.0",
+    "test": "vitest run",
+    "repair:project-k-timing": "node scripts/repair-project-k-timing.mjs",
     "build": "tsc -b && vite build",
     "preview": "vite preview --host 0.0.0.0",
     "deploy": "npm run build && wrangler deploy"
@@ -19,6 +21,7 @@
     "@vitejs/plugin-react": "^5.1.1",
     "typescript": "^5.9.3",
     "vite": "^7.2.7",
+    "vitest": "^4.1.10",
     "wrangler": "^4.107.0"
   }
 }
