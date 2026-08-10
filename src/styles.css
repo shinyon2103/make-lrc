@@ -74,6 +74,7 @@ button {
   font-weight: 700;
   cursor: pointer;
   touch-action: manipulation;
+  transition: background-color 160ms ease, border-color 160ms ease, box-shadow 160ms ease, color 160ms ease, transform 100ms ease;
 }
 
 button:disabled {
@@ -84,6 +85,14 @@ button:disabled {
 
 button:active:not(:disabled) {
   transform: translateY(1px);
+}
+
+@media (hover: hover) {
+  button:hover:not(:disabled):not(.tap-zone) {
+    border-color: color-mix(in srgb, var(--accent), var(--line) 45%);
+    background: color-mix(in srgb, var(--surface), var(--accent-soft) 42%);
+    box-shadow: 0 4px 12px color-mix(in srgb, var(--ink), transparent 90%);
+  }
 }
 
 button:focus-visible,
@@ -172,6 +181,13 @@ h2 {
   flex-wrap: wrap;
 }
 
+.panel-heading-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
 .topbar-action-button {
   display: inline-flex;
   align-items: center;
@@ -179,22 +195,12 @@ h2 {
   gap: 0.45em;
 }
 
-.topbar-action-button::before {
+.button-icon {
+  width: 1.25em;
+  height: 1.25em;
+  flex: 0 0 auto;
   color: var(--accent);
-  font-size: 1.05em;
-  line-height: 1;
-}
-
-.hint-action::before {
-  content: "?";
-}
-
-.copy-action::before {
-  content: "⧉";
-}
-
-.save-action::before {
-  content: "↓";
+  vector-effect: non-scaling-stroke;
 }
 
 .square-action-button {
@@ -204,67 +210,16 @@ h2 {
   display: inline-grid;
   place-items: center;
   flex: 0 0 auto;
-  position: relative;
+  border-radius: 12px;
 }
 
-.language-action::before,
-.language-action::after,
-.theme-action::before,
-.theme-action::after {
-  content: "";
-  position: absolute;
-  display: block;
+.square-action-button .button-icon {
+  width: 22px;
+  height: 22px;
 }
 
-.language-action::before {
-  width: 18px;
-  height: 18px;
-  border: 2px solid var(--accent);
-  border-radius: 50%;
-  background:
-    linear-gradient(90deg, transparent 42%, var(--accent) 42% 58%, transparent 58%),
-    linear-gradient(transparent 47%, var(--accent) 47% 53%, transparent 53%);
-  opacity: 0.95;
-}
-
-.language-action::after {
-  width: 7px;
-  height: 18px;
-  border-left: 2px solid var(--accent);
-  border-right: 2px solid var(--accent);
-  border-radius: 50%;
-}
-
-.theme-action::before {
-  width: 18px;
-  height: 18px;
-  border-radius: 50%;
-  background: var(--accent);
-}
-
-.theme-action::after {
-  width: 18px;
-  height: 18px;
-  border-radius: 50%;
-  background: var(--surface);
-  transform: translate(5px, -3px);
-}
-
-:root[data-theme="dark"] .theme-action::before {
-  background: #f5c542;
-  box-shadow:
-    0 -8px 0 -6px #f5c542,
-    0 8px 0 -6px #f5c542,
-    8px 0 0 -6px #f5c542,
-    -8px 0 0 -6px #f5c542,
-    6px 6px 0 -6px #f5c542,
-    -6px 6px 0 -6px #f5c542,
-    6px -6px 0 -6px #f5c542,
-    -6px -6px 0 -6px #f5c542;
-}
-
-:root[data-theme="dark"] .theme-action::after {
-  display: none;
+:root[data-theme="dark"] .theme-action .button-icon {
+  color: #f5c542;
 }
 
 .help-panel {
@@ -432,13 +387,7 @@ audio {
   gap: 0.45em;
 }
 
-.control-button::before {
-  color: var(--accent);
-  font-size: 1.05em;
-  line-height: 1;
-}
-
-.control-button:disabled::before {
+.control-button:disabled .button-icon {
   color: currentColor;
 }
 
@@ -446,32 +395,11 @@ audio {
   grid-column: span 2;
 }
 
-.play-action::before {
-  content: "▶";
-}
-
-.previous-action::before {
-  content: "↑";
-}
-
-.next-action::before {
-  content: "↓";
-}
-
-.rewind-action::before {
-  content: "↺";
-}
-
-.forward-action::before {
-  content: "↻";
-}
-
-.undo-action::before {
-  content: "↶";
-}
-
-.redo-action::before {
-  content: "↷";
+.compact-action-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.45em;
 }
 
 .options-row {
@@ -513,6 +441,10 @@ audio {
 
 .danger-action {
   border-color: var(--danger-line);
+  color: var(--danger-ink);
+}
+
+.danger-action .button-icon {
   color: var(--danger-ink);
 }
 
@@ -613,14 +545,24 @@ select {
 
   .topbar-actions {
     display: grid;
-    grid-template-columns: 44px 44px repeat(3, minmax(0, 1fr));
+    grid-template-columns: repeat(5, 44px);
+    justify-content: end;
     gap: 6px;
   }
 
   .topbar-actions button {
     min-height: 40px;
-    padding: 0 8px;
-    font-size: 0.92rem;
+    padding: 0;
+  }
+
+  .topbar-action-button {
+    gap: 0;
+    font-size: 0;
+  }
+
+  .topbar-action-button .button-icon {
+    width: 22px;
+    height: 22px;
   }
 
   .audio-panel,

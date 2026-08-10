@@ -41,6 +41,72 @@ type DetailedEndPolicy = "same-line-only" | "none";
 type Language = "ja" | "en";
 type ThemeMode = "light" | "dark";
 
+type IconName =
+  | "globe"
+  | "sun"
+  | "moon"
+  | "help"
+  | "copy"
+  | "download"
+  | "playPause"
+  | "previous"
+  | "next"
+  | "rewind"
+  | "forward"
+  | "undo"
+  | "redo"
+  | "paste"
+  | "add"
+  | "trash";
+
+function Icon({ name }: { name: IconName }) {
+  const commonProps = {
+    className: "button-icon",
+    viewBox: "0 0 24 24",
+    fill: "none",
+    stroke: "currentColor",
+    strokeWidth: 1.9,
+    strokeLinecap: "round" as const,
+    strokeLinejoin: "round" as const,
+    "aria-hidden": true,
+  };
+
+  switch (name) {
+    case "globe":
+      return <svg {...commonProps}><circle cx="12" cy="12" r="8.5" /><path d="M3.8 12h16.4M12 3.5c2.2 2.3 3.4 5.2 3.4 8.5S14.2 18.2 12 20.5C9.8 18.2 8.6 15.3 8.6 12S9.8 5.8 12 3.5Z" /></svg>;
+    case "sun":
+      return <svg {...commonProps}><circle cx="12" cy="12" r="3.5" /><path d="M12 2.5v2M12 19.5v2M2.5 12h2M19.5 12h2M5.3 5.3l1.4 1.4M17.3 17.3l1.4 1.4M18.7 5.3l-1.4 1.4M6.7 17.3l-1.4 1.4" /></svg>;
+    case "moon":
+      return <svg {...commonProps}><path d="M20.4 15.2A8.6 8.6 0 0 1 8.8 3.6 8.7 8.7 0 1 0 20.4 15.2Z" /></svg>;
+    case "help":
+      return <svg {...commonProps}><circle cx="12" cy="12" r="8.5" /><path d="M9.7 9.3a2.5 2.5 0 1 1 3.8 2.1c-1 .6-1.5 1.1-1.5 2.1M12 17.5h.01" /></svg>;
+    case "copy":
+      return <svg {...commonProps}><rect x="8" y="8" width="11" height="11" rx="2" /><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2" /></svg>;
+    case "download":
+      return <svg {...commonProps}><path d="M12 3.5v11M8 10.5l4 4 4-4M4.5 18v1.5h15V18" /></svg>;
+    case "playPause":
+      return <svg {...commonProps}><path d="m4.5 5 7 4.5-7 4.5V5Z" /><path d="M15.5 6v7M19.5 6v7" /></svg>;
+    case "previous":
+      return <svg {...commonProps}><path d="m15 6-6 6 6 6" /><path d="M9 12h10" /></svg>;
+    case "next":
+      return <svg {...commonProps}><path d="m9 6 6 6-6 6" /><path d="M5 12h10" /></svg>;
+    case "rewind":
+      return <svg {...commonProps}><path d="M8.5 7H4V3" /><path d="M4.6 7.2a8.5 8.5 0 1 1-.6 8.5" /><path d="m11.5 9-4 3 4 3V9ZM16.5 9l-4 3 4 3V9Z" /></svg>;
+    case "forward":
+      return <svg {...commonProps}><path d="M15.5 7H20V3" /><path d="M19.4 7.2a8.5 8.5 0 1 0 .6 8.5" /><path d="m12.5 9 4 3-4 3V9ZM7.5 9l4 3-4 3V9Z" /></svg>;
+    case "undo":
+      return <svg {...commonProps}><path d="M9 7 4 12l5 5" /><path d="M4.5 12H14a6 6 0 0 1 6 6" /></svg>;
+    case "redo":
+      return <svg {...commonProps}><path d="m15 7 5 5-5 5" /><path d="M19.5 12H10a6 6 0 0 0-6 6" /></svg>;
+    case "paste":
+      return <svg {...commonProps}><path d="M9 5H6.5A1.5 1.5 0 0 0 5 6.5v13A1.5 1.5 0 0 0 6.5 21h11a1.5 1.5 0 0 0 1.5-1.5v-13A1.5 1.5 0 0 0 17.5 5H15" /><rect x="9" y="3" width="6" height="4" rx="1.5" /><path d="M9 12h6M9 16h4" /></svg>;
+    case "add":
+      return <svg {...commonProps}><path d="M12 5v14M5 12h14" /></svg>;
+    case "trash":
+      return <svg {...commonProps}><path d="M4 7h16M9 7V4h6v3M7 7l1 13h8l1-13M10 11v5M14 11v5" /></svg>;
+  }
+}
+
 const TEXT = {
   ja: {
     appLabel: "MakeLRC エディタ",
@@ -64,6 +130,7 @@ const TEXT = {
     lyricsInput: "歌詞入力",
     lyrics: "歌詞",
     paste: "貼り付け",
+    clearLyrics: "歌詞をクリア",
     lyricsPlaceholder: "ここに歌詞を入力または貼り付け。空行は自動で削除されます。",
     timingControls: "タイミング操作",
     enterLyrics: "歌詞を入力してください",
@@ -114,6 +181,7 @@ const TEXT = {
     lyricsInput: "Lyrics input",
     lyrics: "Lyrics",
     paste: "Paste",
+    clearLyrics: "Clear lyrics",
     lyricsPlaceholder: "Type or paste lyrics here. Blank lines are removed automatically.",
     timingControls: "Timing controls",
     enterLyrics: "Enter lyrics to start",
@@ -1295,6 +1363,11 @@ export function App() {
     setActiveSegmentIndex(0);
   }, [invalidateTimingCapture, releaseButtonFocus]);
 
+  const clearLyrics = useCallback(() => {
+    clearTimings();
+    updateLyrics("");
+  }, [clearTimings, updateLyrics]);
+
   const insertGapAfterCurrentLine = useCallback(() => {
     releaseButtonFocus();
     invalidateTimingCapture();
@@ -1616,7 +1689,9 @@ export function App() {
               title={text.language}
               onMouseDown={preventButtonMouseFocus}
               onClick={() => setLanguage((current) => current === "ja" ? "en" : "ja")}
-            />
+            >
+              <Icon name="globe" />
+            </button>
             <button
               type="button"
               className="square-action-button theme-action"
@@ -1624,12 +1699,15 @@ export function App() {
               title={themeLabel}
               onMouseDown={preventButtonMouseFocus}
               onClick={() => setTheme((current) => current === "light" ? "dark" : "light")}
-            />
-            <button type="button" className="topbar-action-button hint-action" aria-expanded={helpOpen} onMouseDown={preventButtonMouseFocus} onClick={() => setHelpOpen((open) => !open)}>
+            >
+              <Icon name={theme === "light" ? "moon" : "sun"} />
+            </button>
+            <button type="button" className="topbar-action-button hint-action" aria-label={text.help} title={text.help} aria-expanded={helpOpen} onMouseDown={preventButtonMouseFocus} onClick={() => setHelpOpen((open) => !open)}>
+              <Icon name="help" />
               {text.help}
             </button>
-            <button type="button" className="topbar-action-button copy-action" onMouseDown={preventButtonMouseFocus} onClick={copyOutput}>{text.copy}</button>
-            <button type="button" className="topbar-action-button save-action" onMouseDown={preventButtonMouseFocus} onClick={downloadOutput}>{text.save}</button>
+            <button type="button" className="topbar-action-button copy-action" aria-label={text.copy} title={text.copy} onMouseDown={preventButtonMouseFocus} onClick={copyOutput}><Icon name="copy" />{text.copy}</button>
+            <button type="button" className="topbar-action-button save-action" aria-label={text.save} title={text.save} onMouseDown={preventButtonMouseFocus} onClick={downloadOutput}><Icon name="download" />{text.save}</button>
           </div>
         </header>
 
@@ -1714,7 +1792,10 @@ export function App() {
           <section className="lyrics-panel" aria-label={text.lyricsInput}>
             <div className="panel-heading">
               <h2>{text.lyrics}</h2>
-              <button type="button" onMouseDown={preventButtonMouseFocus} onClick={pasteLyrics}>{text.paste}</button>
+              <div className="panel-heading-actions">
+                <button type="button" className="compact-action-button" onMouseDown={preventButtonMouseFocus} onClick={pasteLyrics}><Icon name="paste" />{text.paste}</button>
+                <button type="button" className="compact-action-button danger-action" disabled={!lyrics} onMouseDown={preventButtonMouseFocus} onClick={clearLyrics}><Icon name="trash" />{text.clearLyrics}</button>
+              </div>
             </div>
             <textarea
               value={lyrics}
@@ -1756,13 +1837,13 @@ export function App() {
               <span>{text.tapToStamp}</span>
             </button>
             <div className="control-grid">
-              <button type="button" className="control-button play-action" onMouseDown={preventButtonMouseFocus} onClick={togglePlayback}>{text.playPause}</button>
-              <button type="button" className="control-button previous-action" onMouseDown={preventButtonMouseFocus} onClick={() => moveActive(-1)}>{text.previousLine}</button>
-              <button type="button" className="control-button next-action" onMouseDown={preventButtonMouseFocus} onClick={() => moveActive(1)}>{text.nextLine}</button>
-              <button type="button" className="control-button rewind-action" onMouseDown={preventButtonMouseFocus} onClick={() => seekBy(-SEEK_STEP_SECONDS)}>{text.seekBack}</button>
-              <button type="button" className="control-button forward-action" onMouseDown={preventButtonMouseFocus} onClick={() => seekBy(SEEK_STEP_SECONDS)}>{text.seekForward}</button>
-              <button type="button" className="control-button undo-action" disabled={!undoStack.length} onMouseDown={preventButtonMouseFocus} onClick={undo}>{text.undo}</button>
-              <button type="button" className="control-button redo-action" disabled={!redoStack.length} onMouseDown={preventButtonMouseFocus} onClick={redo}>{text.redo}</button>
+              <button type="button" className="control-button play-action" onMouseDown={preventButtonMouseFocus} onClick={togglePlayback}><Icon name="playPause" />{text.playPause}</button>
+              <button type="button" className="control-button previous-action" onMouseDown={preventButtonMouseFocus} onClick={() => moveActive(-1)}><Icon name="previous" />{text.previousLine}</button>
+              <button type="button" className="control-button next-action" onMouseDown={preventButtonMouseFocus} onClick={() => moveActive(1)}><Icon name="next" />{text.nextLine}</button>
+              <button type="button" className="control-button rewind-action" onMouseDown={preventButtonMouseFocus} onClick={() => seekBy(-SEEK_STEP_SECONDS)}><Icon name="rewind" />{text.seekBack}</button>
+              <button type="button" className="control-button forward-action" onMouseDown={preventButtonMouseFocus} onClick={() => seekBy(SEEK_STEP_SECONDS)}><Icon name="forward" />{text.seekForward}</button>
+              <button type="button" className="control-button undo-action" disabled={!undoStack.length} onMouseDown={preventButtonMouseFocus} onClick={undo}><Icon name="undo" />{text.undo}</button>
+              <button type="button" className="control-button redo-action" disabled={!redoStack.length} onMouseDown={preventButtonMouseFocus} onClick={redo}><Icon name="redo" />{text.redo}</button>
             </div>
             <div className="options-row">
               <label>
@@ -1813,8 +1894,8 @@ export function App() {
                   <option value="srt">SRT</option>
                 </select>
               </label>
-              <button type="button" onMouseDown={preventButtonMouseFocus} onClick={insertGapAfterCurrentLine}>{text.addGap}</button>
-              <button type="button" className="danger-action" onMouseDown={preventButtonMouseFocus} onClick={clearTimings}>{text.clearAllTimings}</button>
+              <button type="button" className="compact-action-button" onMouseDown={preventButtonMouseFocus} onClick={insertGapAfterCurrentLine}><Icon name="add" />{text.addGap}</button>
+              <button type="button" className="compact-action-button danger-action" onMouseDown={preventButtonMouseFocus} onClick={clearTimings}><Icon name="trash" />{text.clearAllTimings}</button>
             </div>
             {timingWarnings.length > 0 && (
               <div className="timing-warning" role="alert">
