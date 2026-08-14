@@ -5,6 +5,7 @@ import type {
   TouchEvent as ReactTouchEvent,
 } from "react";
 import { completeStableTimingCapture, readStableMediaTime } from "./timingCapture";
+import { applyTimingRetake } from "./timingRetake";
 
 const STORAGE_KEY = "makelrc.autosave.v3";
 const LANGUAGE_STORAGE_KEY = "makelrc.language";
@@ -594,6 +595,14 @@ function buildProjectKJsonOutput(
       && (row.time ?? 0) < (rows[index - 1].time ?? 0)) {
       errors.push(`行 ${index + 1}: 開始時刻は前の行以降にしてください。`);
     }
+    if (timingMode === "segment") {
+      const segmentCount = tokenizeForMode(row.text, timingMode).length;
+      const hasOrphanedStarts = row.segmentTimings.slice(segmentCount).some(Number.isFinite);
+      const hasOrphanedEnds = row.segmentEndTimings.slice(segmentCount).some(Number.isFinite);
+      if (hasOrphanedStarts || hasOrphanedEnds) {
+        errors.push(`行 ${index + 1}: 歌詞に対応しない古いセグメント時刻が残っています。行を打ち直してください。`);
+      }
+    }
   });
 
   const documentLines = rows.map((row, index) => {
@@ -1132,51 +1141,23 @@ export function App() {
     const tokens = tokenizeForMode(lines[capture.lineIndex] ?? "", capture.timingMode);
     pushUndo();
 
-    if (capture.timingMode === "line") {
-      setTimings((current) => {
-        const next = [...current];
-        next[capture.lineIndex] = capture.startTime;
-        return next;
-      });
-      setEndTimings((current) => {
-        const next = [...current];
-        next[capture.lineIndex] = hasUsableEnd ? safeEndTime : undefined;
-        return next;
-      });
-    } else {
-      setSegmentTimings((current) => {
-        const next = [...current];
-        const lineTimings = [...(next[capture.lineIndex] ?? [])];
-        lineTimings[capture.segmentIndex] = capture.startTime;
-        lineTimings.length = tokens.length;
-        next[capture.lineIndex] = lineTimings;
-        return next;
-      });
-      setSegmentEndTimings((current) => {
-        const next = [...current];
-        const lineEndTimings = [...(next[capture.lineIndex] ?? [])];
-        lineEndTimings[capture.segmentIndex] = hasUsableEnd ? safeEndTime : undefined;
-        lineEndTimings.length = tokens.length;
-        next[capture.lineIndex] = lineEndTimings;
-        return next;
-      });
-      if (capture.segmentIndex === 0) {
-        setTimings((current) => {
-          const next = [...current];
-          next[capture.lineIndex] = capture.startTime;
-          return next;
-        });
-      }
-      if (capture.segmentIndex === 0 || capture.segmentIndex === tokens.length - 1) {
-        setEndTimings((current) => {
-          const next = [...current];
-          next[capture.lineIndex] = capture.segmentIndex === tokens.length - 1 && hasUsableEnd
-            ? safeEndTime
-            : undefined;
-          return next;
-        });
-      }
-    }
+    const retakenState = applyTimingRetake({
+      timings,
+      endTimings,
+      segmentTimings,
+      segmentEndTimings,
+    }, {
+      lineIndex: capture.lineIndex,
+      segmentIndex: capture.segmentIndex,
+      timingMode: capture.timingMode,
+      startTime: capture.startTime,
+      endTime: hasUsableEnd ? safeEndTime : undefined,
+      segmentCount: tokens.length,
+    });
+    setTimings(retakenState.timings);
+    setEndTimings(retakenState.endTimings);
+    setSegmentTimings(retakenState.segmentTimings);
+    setSegmentEndTimings(retakenState.segmentEndTimings);
 
     if (capture.timingMode !== "line" && capture.segmentIndex + 1 < tokens.length) {
       const nextSegmentIndex = capture.segmentIndex + 1;
@@ -1190,7 +1171,7 @@ export function App() {
     activeSegmentIndexRef.current = 0;
     setActiveIndex(nextLineIndex);
     setActiveSegmentIndex(0);
-  }, [lines, pushUndo]);
+  }, [endTimings, lines, pushUndo, segmentEndTimings, segmentTimings, timings]);
 
   const stampCurrentLine = useCallback(() => {
     startTimingCapture();
